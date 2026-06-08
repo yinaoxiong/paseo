@@ -73,6 +73,18 @@ Repo dev commands use checkout-local state by default. In this checkout, `PASEO_
 
 See [docs/development.md](docs/development.md) for full setup, build sync requirements, and debugging.
 
+## Private Fork Workflow
+
+This checkout may be used as a private integration branch.
+
+- Keep `/mnt/private_yax_qy4/projects/paseo` on `personal/stable` for private daily use.
+- Keep upstream PR branches in separate worktrees, usually under `/data/home/root/.paseo/worktrees/...`.
+- Upstream PR branches must be created from `origin/main`, not from `personal/stable`.
+- Personal-only files such as `.planning/` and `.devcontainer/` must not be included in upstream PRs.
+- To use an upstream PR locally, cherry-pick the clean PR commit into `personal/stable` with `-x`.
+- To upstream private work, extract a clean `pr/<topic>` branch from `origin/main`, then cherry-pick or patch only the relevant commits.
+- Before opening an upstream PR, verify with `git diff origin/main...HEAD` and ensure no private workflow/config files are included.
+
 ## Critical rules
 
 - **NEVER restart the main Paseo daemon on port 6767 without permission** — it manages all running agents. If you're an agent, restarting it kills your own process.
