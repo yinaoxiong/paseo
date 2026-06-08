@@ -1,0 +1,53 @@
+{
+  "name": "paseo-dev",
+  // node:22-bookworm matches CI (Node 22) and pulls reliably from this network
+  // (the mcr.microsoft.com devcontainer images are slow/unreachable here).
+  "image": "node:22-bookworm",
+  "workspaceFolder": "/workspaces/paseo",
+  // Code is bind-mounted so edits sync live in both directions.
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/paseo,type=bind,consistency=cached",
+  // Every node_modules lives on a local-disk Docker named volume, NOT on the
+  // bind-mounted fuse filesystem. npm workspaces creates a node_modules at the
+  // repo root AND inside each of the 10 packages, so we mount one volume per
+  // location (11 total). A volume masks the bind-mount at that subpath, so the
+  // fuse working tree stays completely free of node_modules. Shared prefix
+  // `paseo-nm-` makes them easy to list/remove:
+  //   docker volume ls -q | grep '^paseo-nm-' | xargs docker volume rm
+  "mounts": [
+    "source=paseo-nm-root,target=/workspaces/paseo/node_modules,type=volume",
+    "source=paseo-nm-expo-two-way-audio,target=/workspaces/paseo/packages/expo-two-way-audio/node_modules,type=volume",
+    "source=paseo-nm-highlight,target=/workspaces/paseo/packages/highlight/node_modules,type=volume",
+    "source=paseo-nm-protocol,target=/workspaces/paseo/packages/protocol/node_modules,type=volume",
+    "source=paseo-nm-client,target=/workspaces/paseo/packages/client/node_modules,type=volume",
+    "source=paseo-nm-server,target=/workspaces/paseo/packages/server/node_modules,type=volume",
+    "source=paseo-nm-app,target=/workspaces/paseo/packages/app/node_modules,type=volume",
+    "source=paseo-nm-relay,target=/workspaces/paseo/packages/relay/node_modules,type=volume",
+    "source=paseo-nm-website,target=/workspaces/paseo/packages/website/node_modules,type=volume",
+    "source=paseo-nm-desktop,target=/workspaces/paseo/packages/desktop/node_modules,type=volume",
+    "source=paseo-nm-cli,target=/workspaces/paseo/packages/cli/node_modules,type=volume"
+  ],
+  // The fuse working tree is owned by root on the host, so run as root inside the
+  // container (uid 0 matches the host) - full access to both the code and the
+  // volumes, and no chown dance. Point npm at the Tencent mirror, then install.
+  "onCreateCommand": "npm config set registry https://mirrors.tencent.com/npm/",
+  // --ignore-scripts skips ALL package lifecycle scripts. Several deps download
+  // prebuilt binaries from github.com during postinstall (electron, sharp via
+  // miniflare, playwright, onnxruntime-node), which is unreachable on this
+  // network and falls back to source compiles that fail. None of those binaries
+  // are needed to build / typecheck / unit-test the server + CLI stack, so we
+  // skip them wholesale. NOTE: node-pty is also left uncompiled, so the live
+  // terminal runtime won't work in here - drop --ignore-scripts and install the
+  // relevant system libs (e.g. libvips-dev) if you need the full runtime.
+  "postCreateCommand": "npm ci --ignore-scripts",
+  "remoteUser": "root",
+  "containerEnv": {
+    // Memory headroom for the tsc/tsgo builds across the monorepo.
+    "NODE_OPTIONS": "--max-old-space-size=4096"
+  },
+  "customizations": {
+    "vscode": {
+      // This repo lints/formats with oxlint + oxfmt (not Biome).
+      "extensions": ["oxc.oxc-vscode"]
+    }
+  }
+}
