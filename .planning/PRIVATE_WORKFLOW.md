@@ -110,3 +110,28 @@ If typecheck fails because workspace declarations are stale after switching the 
 npm run build:client
 npm run build:server
 ```
+
+Run all private builds inside the container defined by `/mnt/private_yax_qy4/projects/paseo/.devcontainer`. This is especially important for CLI tarballs because the package includes production `node_modules` and native/runtime dependencies. Building on the host can accidentally capture a different Node/npm/native dependency environment.
+
+## Personal CLI Tarballs
+
+For private daily use, prefer a fully bundled CLI tarball over a desktop build when the changes are server-only. The target install shape is:
+
+```bash
+npm install -g /mnt/private_yax_qy4/projects/paseo/.local-build/getpaseo-cli-<version>.tgz
+paseo --version
+```
+
+The tarball must be built from the current `personal/stable` checkout inside the devcontainer, and it must include the local workspace packages plus production runtime dependencies under the CLI package's bundled `node_modules`.
+
+Do not create this package by unpacking or patching a previous `.local-build/*.tgz`. Build it from source each time:
+
+1. Confirm `/workspaces/paseo` in `paseo-dev` is mounted to `/mnt/private_yax_qy4/projects/paseo` and is on `personal/stable`.
+2. Run `npm run build:server` in the container to rebuild highlight, relay, protocol, client, server, and CLI.
+3. Stage local `@getpaseo/*` workspace packages with a private build version such as `0.1.90+personal.1`.
+4. In a clean CLI staging directory, install production dependencies using those local workspace package tarballs.
+5. Add `node_modules` to the CLI package files and populate `bundledDependencies` from the installed dependency tree.
+6. Run `npm pack --ignore-scripts` from the clean CLI staging directory.
+7. Verify by installing the result into a temporary npm prefix and checking both `paseo --version` and bundled `@getpaseo/server/package.json`.
+
+The CLI package's bundled server version must match the CLI version. The package should not depend on registry copies of `@getpaseo/server`, `@getpaseo/client`, `@getpaseo/protocol`, `@getpaseo/relay`, or `@getpaseo/highlight`.
