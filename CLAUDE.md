@@ -72,6 +72,8 @@ This checkout may be used as a private integration branch.
 - Keep upstream PR branches in separate worktrees, usually under `/data/home/root/.paseo/worktrees/...`.
 - Upstream PR branches must be created from `origin/main`, not from `personal/stable`.
 - Personal-only files such as `.planning/` and `.devcontainer/` must not be included in upstream PRs.
+- Private builds must run inside the container defined by `/mnt/private_yax_qy4/projects/paseo/.devcontainer`.
+- Personal CLI tarballs for daily use should be fully bundled so `npm install -g <tgz>` installs the local server/runtime dependencies, not registry copies.
 - To use an upstream PR locally, cherry-pick the clean PR commit into `personal/stable` with `-x`.
 - To upstream private work, extract a clean `pr/<topic>` branch from `origin/main`, then cherry-pick or patch only the relevant commits.
 - Before opening an upstream PR, verify with `git diff origin/main...HEAD` and ensure no private workflow/config files are included.
