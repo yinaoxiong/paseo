@@ -9,8 +9,11 @@ import {
   DEFAULT_ACP_CAPABILITIES,
   deriveModelDefinitionsFromACP,
   deriveModesFromACP,
+  type ACPProviderModelWriterContext,
+  type ACPProviderModelWriteResult,
   type SessionStateResponse,
 } from "./acp-agent.js";
+import type { ClientCapabilities } from "@agentclientprotocol/sdk";
 import {
   formatDiagnosticStatus,
   formatProviderDiagnostic,
@@ -37,6 +40,8 @@ interface GenericACPAgentClientOptions {
   providerId?: string;
   label?: string;
   providerParams?: unknown;
+  clientCapabilities?: ClientCapabilities;
+  modelWriter?: (context: ACPProviderModelWriterContext) => Promise<ACPProviderModelWriteResult>;
   waitForInitialCommands?: boolean;
   initialCommandsWaitTimeoutMs?: number;
 }
@@ -54,6 +59,8 @@ export class GenericACPAgentClient extends ACPAgentClient {
         env: options.env,
       },
       defaultCommand: options.command,
+      clientCapabilities: options.clientCapabilities,
+      modelWriter: options.modelWriter,
       capabilities: buildGenericACPCapabilities(options),
       waitForInitialCommands: options.waitForInitialCommands,
       initialCommandsWaitTimeoutMs: options.initialCommandsWaitTimeoutMs,

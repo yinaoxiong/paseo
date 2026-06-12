@@ -1,63 +1,209 @@
+import type { SessionConfigOption } from "@agentclientprotocol/sdk";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import type { SpawnedACPProcess, SessionStateResponse } from "./acp-agent.js";
-import { CursorACPAgentClient, parseCursorAgentModelsOutput } from "./cursor-acp-agent.js";
+import {
+  CursorACPAgentClient,
+  expandCursorParameterizedModels,
+  writeCursorModelVariant,
+} from "./cursor-acp-agent.js";
 import { createTestLogger } from "../../../test-utils/test-logger.js";
-import * as spawnUtils from "../../../utils/spawn.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("parseCursorAgentModelsOutput", () => {
-  test("parses Cursor model list output and marks default model", () => {
-    expect(
-      parseCursorAgentModelsOutput(`
-Available models
+const cursorModelExtensionResponse = {
+  models: [
+    {
+      value: "gpt-5.5",
+      name: "GPT-5.5",
+      configOptions: [
+        {
+          id: "context",
+          name: "Context",
+          category: "model_config",
+          type: "select",
+          currentValue: "272k",
+          options: [
+            { value: "272k", name: "272K" },
+            { value: "1m", name: "1M" },
+          ],
+        },
+        {
+          id: "reasoning",
+          name: "Reasoning",
+          category: "thought_level",
+          type: "select",
+          currentValue: "medium",
+          options: [
+            { value: "none", name: "None" },
+            { value: "medium", name: "Medium" },
+            { value: "high", name: "High" },
+          ],
+        },
+        {
+          id: "fast",
+          name: "Fast",
+          category: "model_config",
+          type: "select",
+          currentValue: "false",
+          options: [
+            { value: "false", name: "Off" },
+            { value: "true", name: "Fast" },
+          ],
+        },
+      ],
+    },
+  ],
+};
 
-auto - Auto
-composer-2-fast - Composer 2 Fast (default)
-gpt-5.5-low - GPT-5.5 1M Low (current)
-
-Tip: use --model <id> (or /model <id> in interactive mode) to switch.
-`),
-    ).toEqual([
-      { provider: "acp", id: "auto", label: "Auto", isDefault: false },
+describe("expandCursorParameterizedModels", () => {
+  test("expands Cursor model config options into selectable model variants", () => {
+    expect(expandCursorParameterizedModels(cursorModelExtensionResponse, "gpt-5.5")).toEqual([
       {
         provider: "acp",
-        id: "composer-2-fast",
-        label: "Composer 2 Fast",
+        id: "gpt-5.5[context=272k,fast=false]",
+        label: "GPT-5.5 272K",
         isDefault: true,
+        thinkingOptions: [
+          { id: "none", label: "None", description: undefined, isDefault: false },
+          { id: "medium", label: "Medium", description: undefined, isDefault: true },
+          { id: "high", label: "High", description: undefined, isDefault: false },
+        ],
+        defaultThinkingOptionId: "medium",
       },
       {
         provider: "acp",
-        id: "gpt-5.5-low",
-        label: "GPT-5.5 1M Low",
+        id: "gpt-5.5[context=272k,fast=true]",
+        label: "GPT-5.5 272K Fast",
         isDefault: false,
+        thinkingOptions: [
+          { id: "none", label: "None", description: undefined, isDefault: false },
+          { id: "medium", label: "Medium", description: undefined, isDefault: true },
+          { id: "high", label: "High", description: undefined, isDefault: false },
+        ],
+        defaultThinkingOptionId: "medium",
       },
-    ]);
-  });
-
-  test("falls back to first model as default when Cursor marks none", () => {
-    expect(
-      parseCursorAgentModelsOutput(`
-Available models
-composer-2 - Composer 2
-gpt-5.5-low - GPT-5.5 1M Low
-`),
-    ).toEqual([
-      { provider: "acp", id: "composer-2", label: "Composer 2", isDefault: true },
-      { provider: "acp", id: "gpt-5.5-low", label: "GPT-5.5 1M Low", isDefault: false },
+      {
+        provider: "acp",
+        id: "gpt-5.5[context=1m,fast=false]",
+        label: "GPT-5.5 1M",
+        isDefault: false,
+        thinkingOptions: [
+          { id: "none", label: "None", description: undefined, isDefault: false },
+          { id: "medium", label: "Medium", description: undefined, isDefault: true },
+          { id: "high", label: "High", description: undefined, isDefault: false },
+        ],
+        defaultThinkingOptionId: "medium",
+      },
+      {
+        provider: "acp",
+        id: "gpt-5.5[context=1m,fast=true]",
+        label: "GPT-5.5 1M Fast",
+        isDefault: false,
+        thinkingOptions: [
+          { id: "none", label: "None", description: undefined, isDefault: false },
+          { id: "medium", label: "Medium", description: undefined, isDefault: true },
+          { id: "high", label: "High", description: undefined, isDefault: false },
+        ],
+        defaultThinkingOptionId: "medium",
+      },
     ]);
   });
 });
 
-describe("CursorACPAgentClient model fallback", () => {
+describe("writeCursorModelVariant", () => {
+  test("writes model and parameter config options for synthetic Cursor variants", async () => {
+    const configOptions: SessionConfigOption[] = [
+      {
+        id: "model",
+        name: "Model",
+        category: "model",
+        type: "select",
+        currentValue: "gpt-5.5",
+        options: [{ value: "gpt-5.5", name: "GPT-5.5" }],
+      },
+      {
+        id: "context",
+        name: "Context",
+        category: "model_config",
+        type: "select",
+        currentValue: "272k",
+        options: [{ value: "1m", name: "1M" }],
+      },
+      {
+        id: "reasoning",
+        name: "Reasoning",
+        category: "thought_level",
+        type: "select",
+        currentValue: "medium",
+        options: [{ value: "high", name: "High" }],
+      },
+      {
+        id: "fast",
+        name: "Fast",
+        category: "model_config",
+        type: "select",
+        currentValue: "false",
+        options: [{ value: "true", name: "Fast" }],
+      },
+    ];
+    const setSessionConfigOption = vi.fn(async () => ({ configOptions }));
+
+    await expect(
+      writeCursorModelVariant({
+        connection: { setSessionConfigOption } as never,
+        sessionId: "session-1",
+        requestedModelId: "gpt-5.5[context=1m,fast=true,reasoning=high]",
+        currentModelId: "gpt-5.5",
+        selection: {
+          availableModel: null,
+          configOption: configOptions[0] as Extract<SessionConfigOption, { type: "select" }>,
+          configChoice: null,
+          hasAvailableModels: true,
+        },
+        configOptions,
+        logger: createTestLogger(),
+      }),
+    ).resolves.toEqual({
+      handled: true,
+      currentModelId: "gpt-5.5[context=1m,fast=true,reasoning=high]",
+      thinkingOptionId: "high",
+      configOptions,
+    });
+
+    expect(setSessionConfigOption).toHaveBeenNthCalledWith(1, {
+      sessionId: "session-1",
+      configId: "model",
+      value: "gpt-5.5",
+    });
+    expect(setSessionConfigOption).toHaveBeenNthCalledWith(2, {
+      sessionId: "session-1",
+      configId: "context",
+      value: "1m",
+    });
+    expect(setSessionConfigOption).toHaveBeenNthCalledWith(3, {
+      sessionId: "session-1",
+      configId: "fast",
+      value: "true",
+    });
+    expect(setSessionConfigOption).toHaveBeenNthCalledWith(4, {
+      sessionId: "session-1",
+      configId: "reasoning",
+      value: "high",
+    });
+  });
+});
+
+describe("CursorACPAgentClient model discovery", () => {
   class TestCursorACPAgentClient extends CursorACPAgentClient {
     constructor(options: {
       command?: [string, ...string[]];
       env?: Record<string, string>;
       response: SessionStateResponse;
+      extResponse?: unknown;
+      extError?: Error;
     }) {
       super({
         logger: createTestLogger(),
@@ -65,15 +211,22 @@ describe("CursorACPAgentClient model fallback", () => {
         env: options.env,
       });
       this.response = options.response;
+      this.extResponse = options.extResponse;
+      this.extError = options.extError;
     }
 
     private readonly response: SessionStateResponse;
+    private readonly extResponse: unknown;
+    private readonly extError: Error | undefined;
 
     protected override async spawnProcess(): Promise<SpawnedACPProcess> {
       return {
         child: { kill: vi.fn(), exitCode: 0, signalCode: null, once: vi.fn() },
         connection: {
           newSession: vi.fn().mockResolvedValue(this.response),
+          extMethod: this.extError
+            ? vi.fn().mockRejectedValue(this.extError)
+            : vi.fn().mockResolvedValue(this.extResponse ?? { models: [] }),
         },
         initialize: { agentCapabilities: {} },
       } as SpawnedACPProcess;
@@ -82,79 +235,27 @@ describe("CursorACPAgentClient model fallback", () => {
     protected override async closeProbe(): Promise<void> {}
   }
 
-  test("uses cursor-agent models when Cursor ACP reports zero models", async () => {
-    const execCommand = vi.spyOn(spawnUtils, "execCommand").mockResolvedValue({
-      stdout: "Available models\ncomposer-2-fast - Composer 2 Fast (default)\n",
-      stderr: "",
-    });
+  test("uses Cursor ACP extension to list parameterized model variants", async () => {
     const client = new TestCursorACPAgentClient({
-      response: { sessionId: "session-1", models: null, configOptions: [] },
+      response: {
+        sessionId: "session-1",
+        models: { currentModelId: "gpt-5.5", availableModels: [] },
+        configOptions: [],
+      },
+      extResponse: cursorModelExtensionResponse,
     });
 
     const models = await client.listModels({ cwd: "/tmp/cursor", force: false });
 
-    expect(models).toEqual([
-      {
-        provider: "acp",
-        id: "composer-2-fast",
-        label: "Composer 2 Fast",
-        isDefault: true,
-      },
+    expect(models.map((model) => [model.id, model.label, model.isDefault])).toEqual([
+      ["gpt-5.5[context=272k,fast=false]", "GPT-5.5 272K", true],
+      ["gpt-5.5[context=272k,fast=true]", "GPT-5.5 272K Fast", false],
+      ["gpt-5.5[context=1m,fast=false]", "GPT-5.5 1M", false],
+      ["gpt-5.5[context=1m,fast=true]", "GPT-5.5 1M Fast", false],
     ]);
-    expect(execCommand).toHaveBeenCalledWith(
-      "cursor-agent",
-      ["models"],
-      expect.objectContaining({ timeout: expect.any(Number) }),
-    );
   });
 
-  test("uses cursor-agent models for absolute cursor-agent commands", async () => {
-    const execCommand = vi.spyOn(spawnUtils, "execCommand").mockResolvedValue({
-      stdout: "Available models\ncomposer-2-fast - Composer 2 Fast (default)\n",
-      stderr: "",
-    });
-    const client = new TestCursorACPAgentClient({
-      command: ["/opt/cursor/bin/cursor-agent", "acp"],
-      response: { sessionId: "session-1", models: null, configOptions: [] },
-    });
-
-    await expect(client.listModels({ cwd: "/tmp/cursor", force: false })).resolves.toEqual([
-      {
-        provider: "acp",
-        id: "composer-2-fast",
-        label: "Composer 2 Fast",
-        isDefault: true,
-      },
-    ]);
-    expect(execCommand).toHaveBeenCalledWith(
-      "/opt/cursor/bin/cursor-agent",
-      ["models"],
-      expect.objectContaining({ timeout: expect.any(Number) }),
-    );
-  });
-
-  test("passes Cursor provider env to cursor-agent models fallback", async () => {
-    const execCommand = vi.spyOn(spawnUtils, "execCommand").mockResolvedValue({
-      stdout: "Available models\ncomposer-2-fast - Composer 2 Fast (default)\n",
-      stderr: "",
-    });
-    const env = { CURSOR_AGENT_LOG: "debug" };
-    const client = new TestCursorACPAgentClient({
-      env,
-      response: { sessionId: "session-1", models: null, configOptions: [] },
-    });
-
-    await client.listModels({ cwd: "/tmp/cursor", force: false });
-
-    expect(execCommand).toHaveBeenCalledWith(
-      "cursor-agent",
-      ["models"],
-      expect.objectContaining({ envOverlay: env }),
-    );
-  });
-
-  test("does not run fallback when ACP returns models", async () => {
-    const execCommand = vi.spyOn(spawnUtils, "execCommand");
+  test("falls back to ACP models when Cursor extension fails", async () => {
     const client = new TestCursorACPAgentClient({
       response: {
         sessionId: "session-1",
@@ -164,6 +265,7 @@ describe("CursorACPAgentClient model fallback", () => {
         },
         configOptions: [],
       },
+      extError: new Error("extension unavailable"),
     });
 
     await expect(client.listModels({ cwd: "/tmp/cursor", force: false })).resolves.toEqual([
@@ -177,17 +279,15 @@ describe("CursorACPAgentClient model fallback", () => {
         defaultThinkingOptionId: undefined,
       },
     ]);
-    expect(execCommand).not.toHaveBeenCalled();
   });
 
-  test("does not run fallback when command is not cursor-agent", async () => {
-    const execCommand = vi.spyOn(spawnUtils, "execCommand");
+  test("does not run Cursor-specific discovery when command is not cursor-agent", async () => {
     const client = new TestCursorACPAgentClient({
       command: ["other-agent", "acp"],
       response: { sessionId: "session-1", models: null, configOptions: [] },
+      extResponse: cursorModelExtensionResponse,
     });
 
     await expect(client.listModels({ cwd: "/tmp/cursor", force: false })).resolves.toEqual([]);
-    expect(execCommand).not.toHaveBeenCalled();
   });
 });
