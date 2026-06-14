@@ -1,0 +1,36 @@
+{
+  "experiment": "cancel",
+  "status": "failed",
+  "recordedAt": "2026-06-13T08:32:48.415Z",
+  "environment": {
+    "node": "v22.22.3",
+    "npm": "10.9.8",
+    "packageVersion": "1.0.18",
+    "hasCursorApiKey": true,
+    "cursorApiKeySource": "provider-config"
+  },
+  "runtime": {
+    "cwd": "/tmp/paseo-cursor-sdk-cancel-U45oUJ",
+    "storePath": ".planning/phases/01-sdk-viability-spike/stores/cancel-246e027d-cb6d-456e-8b42-3dea21faa81e",
+    "model": "composer-2.5",
+    "modeId": "sandbox",
+    "sandboxEnabled": true
+  },
+  "sdk": {
+    "agentIdPrefix": "agent",
+    "agentId": "agent-14a87a6b-7c62-4902-b83e-65b77ccb7760",
+    "streamEventTypeCounts": {},
+    "terminalStatus": "thrown"
+  },
+  "supportsCancel": null,
+  "cancelIssued": false,
+  "error": {
+    "className": "u",
+    "name": "ConfigurationError",
+    "message": "Local SDK sandboxing was requested, but sandboxing is not supported in this environment. Disable local.sandboxOptions.enabled or remove ~/.cursor/sandbox.json to run without sandboxing.",
+    "isRetryable": false,
+    "operation": "agent.send"
+  },
+  "providerImpact": "Cancellation needs design adjustment before production provider implementation.",
+  "attempts": 1
+}

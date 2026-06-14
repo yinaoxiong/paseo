@@ -38,6 +38,74 @@ npx cross-env APP_VARIANT=production expo run:android --variant=release
 rm -rf android
 ```
 
+## Docker arm64 APK smoke builds
+
+For local Android APK smoke testing without EAS, use the project Android builder image. This is
+intended for personal verification builds, not store release publishing.
+
+Build or refresh the cached builder image:
+
+```bash
+npm run android:builder:image
+```
+
+Build an arm64-only release APK:
+
+```bash
+npm run android:apk:arm64
+```
+
+The APK is written to:
+
+```text
+.local-build/paseo-android-arm64-<version>.apk
+```
+
+The builder image is defined in `docker/android-builder/Dockerfile` and is based on
+`reactnativecommunity/react-native-android:v20.1`. The image preinstalls the static Android
+toolchain components this app needs:
+
+- Android platform `android-36`
+- Build Tools `36.0.0` and `35.0.0`
+- CMake `3.22.1`
+- NDK `27.1.12297006` and `27.0.12077973`
+
+The builder image and APK script point npm at the Tencent npm mirror with
+`NPM_CONFIG_REGISTRY=https://mirrors.tencent.com/npm/` and
+`NPM_CONFIG_REPLACE_REGISTRY_HOST=npmjs`, so lockfile `registry.npmjs.org` tarball URLs are
+rewritten to the mirror during `npm ci` without rewriting tarball URLs that are already on the
+mirror.
+
+The APK script copies the current Git working tree's tracked and unignored files into a temporary
+`.local-build/android-arm64-build` workspace, then runs the build inside Docker. This keeps
+`expo prebuild` and generated `packages/app/android` files out of the main checkout. It uses named
+Docker volumes for `node_modules` and Gradle caches, so host-side `node_modules` directories are not
+created.
+
+Build steps performed by `npm run android:apk:arm64`:
+
+1. `npm ci --ignore-scripts`
+2. `npm run build:app-deps`
+3. `APP_VARIANT=production CI=1 NODE_ENV=production npx expo prebuild --platform android --no-install`
+4. Set `reactNativeArchitectures=arm64-v8a` in generated `android/gradle.properties`
+5. `./gradlew :app:assembleRelease -x lint -x test --no-daemon`
+6. Verify the APK contains only `arm64-v8a` native libraries
+7. Verify the APK signature with `apksigner`
+
+Useful knobs:
+
+```bash
+PASEO_ANDROID_BUILDER_IMAGE=my-image:tag npm run android:builder:image
+PASEO_ANDROID_BUILDER_IMAGE=my-image:tag npm run android:apk:arm64
+npm run android:apk:arm64 -- --output .local-build/my-test.apk
+npm run android:apk:arm64 -- --keep-workdir
+PASEO_ANDROID_SKIP_NPM_CI=1 npm run android:apk:arm64
+```
+
+The generated APK is debug-signed by the local Gradle release configuration when no release signing
+credentials are provided. It is suitable for temporary installation/testing, not Play Store upload.
+Use EAS or the release workflows for signed distribution builds.
+
 ### React version lockstep
 
 Keep `react` and `react-dom` pinned to the React version embedded by the current `react-native` release. React Native `0.81.x` embeds `react-native-renderer` `19.1.0`, so `packages/app` must use React `19.1.0`. Bumping React to a newer patch can build successfully but crash at JS startup on Android with `Incompatible React versions`, leaving the app on the native splash screen.

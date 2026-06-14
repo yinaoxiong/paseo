@@ -59,6 +59,10 @@ export const RESOLVABLE_PROVIDER_STATUSES = new Set<ProviderSnapshotEntry["statu
 ]);
 export const SELECTABLE_PROVIDER_STATUSES = new Set<ProviderSnapshotEntry["status"]>(["ready"]);
 
+function requiresExplicitSelection(provider: AgentProvider | string | null | undefined): boolean {
+  return provider === "cursor-sdk";
+}
+
 export type AgentFormAction =
   | {
       type: "RESOLVE";
@@ -118,10 +122,12 @@ export function resolveEffectiveModel(
   if (!availableModels || availableModels.length === 0) return null;
   const normalizedModelId = modelId.trim();
   if (!normalizedModelId) return null;
-  return (
-    availableModels.find((model) => model.id === normalizedModelId) ??
-    resolveDefaultModel(availableModels)
-  );
+  const selectedModel = availableModels.find((model) => model.id === normalizedModelId);
+  if (selectedModel) return selectedModel;
+  if (availableModels.some((model) => requiresExplicitSelection(model.provider))) {
+    return null;
+  }
+  return resolveDefaultModel(availableModels);
 }
 
 export function resolveThinkingOptionId(args: {
@@ -130,6 +136,7 @@ export function resolveThinkingOptionId(args: {
   requestedThinkingOptionId: string;
 }): string {
   const effectiveModel = resolveEffectiveModel(args.availableModels, args.modelId);
+  if (!effectiveModel) return "";
   const thinkingOptions = effectiveModel?.thinkingOptions ?? [];
   if (thinkingOptions.length === 0) return "";
 
@@ -141,7 +148,31 @@ export function resolveThinkingOptionId(args: {
     return normalizedThinkingOptionId;
   }
 
+  if (requiresExplicitSelection(effectiveModel.provider)) {
+    return "";
+  }
+
   return effectiveModel?.defaultThinkingOptionId ?? thinkingOptions[0]?.id ?? "";
+}
+
+function resolveSelectedModelIdForProvider(input: {
+  provider: AgentProvider | null;
+  requestedModelId: string;
+  availableModels: AgentModelDefinition[] | null;
+}): string {
+  const normalizedModelId = normalizeSelectedModelId(input.requestedModelId);
+  if (!normalizedModelId) {
+    return requiresExplicitSelection(input.provider)
+      ? ""
+      : resolveDefaultModelId(input.availableModels);
+  }
+  const hasModelMetadata = Boolean(input.availableModels);
+  const isValidModel =
+    input.availableModels?.some((model) => model.id === normalizedModelId) ?? false;
+  if (requiresExplicitSelection(input.provider) && hasModelMetadata && !isValidModel) {
+    return "";
+  }
+  return normalizedModelId;
 }
 
 export function mergeSelectedComposerPreferences(args: {
@@ -283,17 +314,29 @@ function resolveModelField(input: {
 }): string {
   const { provider, userModified, currentModel, initialValues, providerPrefs, availableModels } =
     input;
-  if (userModified) return currentModel;
+  if (userModified) {
+    if (
+      requiresExplicitSelection(provider) &&
+      availableModels &&
+      currentModel.trim() &&
+      !availableModels.some((model) => model.id === currentModel.trim())
+    ) {
+      return "";
+    }
+    return currentModel;
+  }
   if (!provider) return "";
   const isValidModel = (m: string) => availableModels?.some((am) => am.id === m) ?? false;
   const initialModel = normalizeSelectedModelId(initialValues?.model);
   const preferredModel = normalizeSelectedModelId(providerPrefs?.model);
   const defaultModelId = resolveDefaultModelId(availableModels);
   if (initialModel) {
-    return !availableModels || isValidModel(initialModel) ? initialModel : defaultModelId;
+    if (!availableModels || isValidModel(initialModel)) return initialModel;
+    return requiresExplicitSelection(provider) ? "" : defaultModelId;
   }
   if (preferredModel) {
-    return !availableModels || isValidModel(preferredModel) ? preferredModel : defaultModelId;
+    if (!availableModels || isValidModel(preferredModel)) return preferredModel;
+    return requiresExplicitSelection(provider) ? "" : defaultModelId;
   }
   return "";
 }
@@ -393,15 +436,19 @@ export function resolveFormState(
 }
 
 function pickNextModelForProvider(input: {
+  provider: AgentProvider;
   providerModels: AgentModelDefinition[] | null;
   providerPrefs: ProviderPrefs | undefined;
 }): string {
-  const { providerModels, providerPrefs } = input;
+  const { provider, providerModels, providerPrefs } = input;
   const isValidModel = (m: string) => providerModels?.some((am) => am.id === m) ?? false;
   const preferredModel = normalizeSelectedModelId(providerPrefs?.model);
   const defaultModelId = resolveDefaultModelId(providerModels);
   if (preferredModel && (!providerModels || isValidModel(preferredModel))) {
     return preferredModel;
+  }
+  if (requiresExplicitSelection(provider)) {
+    return "";
   }
   return defaultModelId;
 }
@@ -484,6 +531,7 @@ export function resolveAgentForm(
 
     case "SET_PROVIDER_FROM_USER": {
       const nextModelId = pickNextModelForProvider({
+        provider: action.provider,
         providerModels: action.providerModels,
         providerPrefs: action.providerPrefs,
       });
@@ -509,8 +557,11 @@ export function resolveAgentForm(
     }
 
     case "SET_PROVIDER_AND_MODEL_FROM_USER": {
-      const normalizedModelId = normalizeSelectedModelId(action.modelId);
-      const nextModelId = normalizedModelId || resolveDefaultModelId(action.providerModels);
+      const nextModelId = resolveSelectedModelIdForProvider({
+        provider: action.provider,
+        requestedModelId: action.modelId,
+        availableModels: action.providerModels,
+      });
       const nextThinkingOptionId = resolveThinkingOptionId({
         availableModels: action.providerModels,
         modelId: nextModelId,
@@ -542,8 +593,11 @@ export function resolveAgentForm(
       };
 
     case "SET_MODEL_FROM_USER": {
-      const normalizedModelId = normalizeSelectedModelId(action.modelId);
-      const nextModelId = normalizedModelId || resolveDefaultModelId(action.availableModels);
+      const nextModelId = resolveSelectedModelIdForProvider({
+        provider: state.form.provider,
+        requestedModelId: action.modelId,
+        availableModels: action.availableModels,
+      });
       const nextThinkingOptionId = resolveThinkingOptionId({
         availableModels: action.availableModels,
         modelId: nextModelId,

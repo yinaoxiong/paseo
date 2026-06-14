@@ -31,6 +31,7 @@ import { ClaudeAgentClient } from "./providers/claude/agent.js";
 import { CodexAppServerAgentClient } from "./providers/codex-app-server-agent.js";
 import { CopilotACPAgentClient } from "./providers/copilot-acp-agent.js";
 import { CursorACPAgentClient } from "./providers/cursor-acp-agent.js";
+import { CursorSdkAgentClient } from "./providers/cursor-sdk-agent.js";
 import { GenericACPAgentClient } from "./providers/generic-acp-agent.js";
 import { OpenCodeAgentClient } from "./providers/opencode-agent.js";
 import { PiRpcAgentClient } from "./providers/pi/agent.js";
@@ -125,6 +126,11 @@ const PROVIDER_CLIENT_FACTORIES: Record<string, ProviderClientFactory> = {
       logger,
       command: getCursorACPCommand(runtimeSettings),
       env: runtimeSettings?.env,
+    }),
+  "cursor-sdk": (logger, runtimeSettings) =>
+    new CursorSdkAgentClient({
+      logger,
+      runtimeSettings,
     }),
   opencode: (logger, runtimeSettings) => new OpenCodeAgentClient(logger, runtimeSettings),
   pi: (logger, runtimeSettings, options) =>

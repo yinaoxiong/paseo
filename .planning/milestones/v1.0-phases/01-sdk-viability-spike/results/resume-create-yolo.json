@@ -1,0 +1,48 @@
+{
+  "experiment": "resume-create",
+  "status": "passed",
+  "recordedAt": "2026-06-13T08:37:30.650Z",
+  "environment": {
+    "node": "v22.22.3",
+    "npm": "10.9.8",
+    "packageVersion": "1.0.18",
+    "hasCursorApiKey": true,
+    "cursorApiKeySource": "provider-config"
+  },
+  "runtime": {
+    "cwd": "/tmp/paseo-cursor-sdk-resume-create-yolo-qDlvKP",
+    "storePath": ".planning/phases/01-sdk-viability-spike/stores/resume-yolo-fbfc10e2-12a6-43f6-984a-e880444a88c1",
+    "model": "composer-2.5",
+    "modeId": "yolo",
+    "sandboxEnabled": false,
+    "continuityToken": "[REDACTED]"
+  },
+  "sdk": {
+    "agentIdPrefix": "agent",
+    "agentId": "agent-275e4413-0949-4aa7-b6b4-c869cf33d260",
+    "runId": "run-44b1764d-3b45-430f-ba95-8a2693c2cd3f",
+    "requestId": "891c2de7-79ff-4d15-85de-8a76146bcb76",
+    "streamEventTypeCounts": {
+      "status": 2,
+      "thinking": 5,
+      "assistant": 14,
+      "tool_call": 3
+    },
+    "terminalStatus": "finished",
+    "resultPreview": "已创建 `resume-process-a.txt`，其中包含连续性令牌 [REDACTED]。",
+    "durationMs": 13982
+  },
+  "handle": {
+    "agentId": "agent-275e4413-0949-4aa7-b6b4-c869cf33d260",
+    "cwd": "/tmp/paseo-cursor-sdk-resume-create-yolo-qDlvKP",
+    "storePath": ".planning/phases/01-sdk-viability-spike/stores/resume-yolo-fbfc10e2-12a6-43f6-984a-e880444a88c1",
+    "runtime": "local",
+    "model": "composer-2.5",
+    "modeId": "yolo",
+    "sandboxEnabled": false,
+    "continuityToken": "[REDACTED]"
+  },
+  "error": null,
+  "providerImpact": "Process A produced a local SDK resume handle for Process B.",
+  "attempts": 1
+}

@@ -1,0 +1,44 @@
+{
+  "experiment": "resume-followup",
+  "status": "passed",
+  "recordedAt": "2026-06-13T08:37:50.706Z",
+  "environment": {
+    "node": "v22.22.3",
+    "npm": "10.9.8",
+    "packageVersion": "1.0.18",
+    "hasCursorApiKey": true,
+    "cursorApiKeySource": "provider-config"
+  },
+  "handle": {
+    "agentId": "agent-275e4413-0949-4aa7-b6b4-c869cf33d260",
+    "cwd": "/tmp/paseo-cursor-sdk-resume-create-yolo-qDlvKP",
+    "storePath": ".planning/phases/01-sdk-viability-spike/stores/resume-yolo-fbfc10e2-12a6-43f6-984a-e880444a88c1",
+    "runtime": "local",
+    "model": "composer-2.5",
+    "modeId": "yolo",
+    "sandboxEnabled": false
+  },
+  "resumeSuccess": true,
+  "continuityAssertion": {
+    "status": "passed",
+    "tokenMentioned": true,
+    "expectedTokenPreview": "[REDACTED]"
+  },
+  "sdk": {
+    "agentIdPrefix": "agent",
+    "agentId": "agent-275e4413-0949-4aa7-b6b4-c869cf33d260",
+    "runId": "run-0147d42e-a23a-434f-a1ca-e09984eaff8c",
+    "requestId": "7bb4a9e5-6681-4b97-8feb-5dec54c663e3",
+    "streamEventTypeCounts": {
+      "status": 2,
+      "thinking": 4,
+      "assistant": 50
+    },
+    "terminalStatus": "finished",
+    "resultPreview": "连续性令牌是 **[REDACTED]**，这是我在上一进程（Process A）中被要求记住的。",
+    "durationMs": 11014
+  },
+  "error": null,
+  "providerImpact": "Agent.resume can restore the JSONL-backed local conversation across processes.",
+  "attempts": 1
+}

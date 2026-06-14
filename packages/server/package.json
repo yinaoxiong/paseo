@@ -59,6 +59,7 @@
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.17.1",
     "@anthropic-ai/claude-agent-sdk": "^0.2.133",
+    "@cursor/sdk": "^1.0.18",
     "@getpaseo/client": "0.1.96",
     "@getpaseo/highlight": "0.1.96",
     "@getpaseo/protocol": "0.1.96",

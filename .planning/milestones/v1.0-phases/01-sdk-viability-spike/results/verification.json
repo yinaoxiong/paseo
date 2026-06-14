@@ -1,0 +1,61 @@
+{
+  "experiment": "credentialed-followup-verification",
+  "status": "passed",
+  "recordedAt": "2026-06-13T08:39:00.000Z",
+  "commands": [
+    {
+      "name": "credentialed live probes",
+      "exitCode": 0,
+      "outputSummary": [
+        "import: passed",
+        "auth/config/model probes: passed",
+        "create/send/stream/wait sandbox: failed with unsupported-sandbox ConfigurationError",
+        "create/send/stream/wait yolo: passed",
+        "cancel sandbox: failed with unsupported-sandbox ConfigurationError",
+        "cancel yolo: passed with terminalStatus cancelled",
+        "resume sandbox: failed/blocked because sandbox startup did not produce a live handle",
+        "resume yolo: passed with Agent.resume continuity proof"
+      ]
+    },
+    {
+      "name": "format",
+      "exitCode": 0,
+      "outputSummary": [
+        "npm run format:files -- .planning/PROJECT.md .planning/phases/01-sdk-viability-spike/01-SPIKE-RESULTS.md .planning/phases/01-sdk-viability-spike/01-VERIFICATION.md .planning/phases/01-sdk-viability-spike/scripts/lifecycle-cancel.ts .planning/phases/01-sdk-viability-spike/scripts/lifecycle-resume-create.ts .planning/phases/01-sdk-viability-spike/scripts/lifecycle-resume-followup.ts",
+        "Finished on 6 files."
+      ]
+    },
+    {
+      "name": "lint",
+      "exitCode": 0,
+      "outputSummary": [
+        "npm run lint -- lifecycle-cancel.ts lifecycle-resume-create.ts lifecycle-resume-followup.ts",
+        "Found 0 warnings and 0 errors."
+      ]
+    },
+    {
+      "name": "typecheck",
+      "exitCode": 0,
+      "outputSummary": [
+        "npm run typecheck",
+        "All workspace typecheck scripts completed successfully."
+      ]
+    }
+  ],
+  "testsRun": [],
+  "testsSkippedReason": "No unit or full test suite was required or run for phase-local credentialed SDK probes.",
+  "secretScan": {
+    "scriptsAndResults": {
+      "status": "passed",
+      "scope": ".planning/phases/01-sdk-viability-spike/results",
+      "patternDescription": "raw Cursor API key shaped values or CURSOR_API_KEY assignments",
+      "matches": 0
+    },
+    "syntheticResumeToken": {
+      "status": "passed",
+      "scope": ".planning/phases/01-sdk-viability-spike",
+      "patternDescription": "paseo-resume-token-* synthetic continuity values",
+      "matches": 0
+    }
+  }
+}

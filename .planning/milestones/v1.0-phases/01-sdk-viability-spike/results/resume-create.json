@@ -1,0 +1,36 @@
+{
+  "experiment": "resume-create",
+  "status": "failed",
+  "recordedAt": "2026-06-13T08:33:02.959Z",
+  "environment": {
+    "node": "v22.22.3",
+    "npm": "10.9.8",
+    "packageVersion": "1.0.18",
+    "hasCursorApiKey": true,
+    "cursorApiKeySource": "provider-config"
+  },
+  "runtime": {
+    "cwd": "/tmp/paseo-cursor-sdk-resume-create-InKqOk",
+    "storePath": ".planning/phases/01-sdk-viability-spike/stores/resume-50b7d251-e353-4129-a96e-07a485955484",
+    "model": "composer-2.5",
+    "modeId": "sandbox",
+    "sandboxEnabled": true,
+    "continuityToken": "[REDACTED]"
+  },
+  "sdk": {
+    "agentIdPrefix": "agent",
+    "agentId": "agent-77f2f534-b68e-4416-a186-707f016d27ee",
+    "streamEventTypeCounts": {},
+    "terminalStatus": "thrown"
+  },
+  "handle": null,
+  "error": {
+    "className": "u",
+    "name": "ConfigurationError",
+    "message": "Local SDK sandboxing was requested, but sandboxing is not supported in this environment. Disable local.sandboxOptions.enabled or remove ~/.cursor/sandbox.json to run without sandboxing.",
+    "isRetryable": false,
+    "operation": "agent.send"
+  },
+  "providerImpact": "Cross-process resume create needs design adjustment before production provider implementation.",
+  "attempts": 1
+}

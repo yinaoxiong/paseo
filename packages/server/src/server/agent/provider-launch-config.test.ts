@@ -12,6 +12,7 @@ import {
   resolveProviderCommandPrefix,
   type ProviderRuntimeSettings,
 } from "./provider-launch-config.js";
+import { BUILTIN_PROVIDER_IDS } from "@getpaseo/protocol/provider-manifest";
 
 const originalPath = process.env.PATH;
 const tempDirs: string[] = [];
@@ -320,7 +321,7 @@ describe("ProviderOverrideSchema", () => {
 });
 
 describe("migrateProviderSettings", () => {
-  const builtinProviderIds = ["claude", "codex", "copilot", "opencode", "pi", "omp"];
+  const builtinProviderIds = BUILTIN_PROVIDER_IDS;
 
   test("passes through entries already in the new format", () => {
     const migrated = migrateProviderSettings(

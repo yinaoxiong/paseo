@@ -58,6 +58,58 @@ const CODEX_MODELS: AgentModelDefinition[] = [
   },
 ];
 
+const TEST_CURSOR_DEFINITION: AgentProviderDefinition = {
+  id: "cursor",
+  label: "Cursor",
+  description: "Cursor ACP test provider",
+  defaultModeId: "agent",
+  modes: [{ id: "agent", label: "Agent", icon: "ShieldAlert", colorTier: "moderate" }],
+};
+
+const TEST_CURSOR_SDK_DEFINITION: AgentProviderDefinition = {
+  id: "cursor-sdk",
+  label: "Cursor SDK",
+  description: "Cursor SDK test provider",
+  defaultModeId: "yolo",
+  modes: [{ id: "yolo", label: "YOLO", icon: "ShieldOff", colorTier: "dangerous" }],
+};
+
+const CURSOR_MODELS: AgentModelDefinition[] = [
+  {
+    provider: "cursor",
+    id: "default",
+    label: "Default",
+    isDefault: true,
+    defaultThinkingOptionId: "medium",
+    thinkingOptions: [
+      { id: "low", label: "Low" },
+      { id: "medium", label: "Medium", isDefault: true },
+    ],
+  },
+];
+
+const CURSOR_SDK_MODELS: AgentModelDefinition[] = [
+  {
+    provider: "cursor-sdk",
+    id: "sdk:gpt-5.5:context=1m",
+    label: "GPT-5.5 - 1M",
+    defaultThinkingOptionId: "medium",
+    thinkingOptions: [
+      { id: "low", label: "Low" },
+      { id: "medium", label: "Medium", isDefault: true },
+    ],
+  },
+  {
+    provider: "cursor-sdk",
+    id: "sdk:gpt-5.5:context=272k",
+    label: "GPT-5.5 - 272K",
+    thinkingOptions: [
+      { id: "low", label: "Low" },
+      { id: "medium", label: "Medium" },
+    ],
+  },
+];
+
 function makeProviderMap(
   ...definitions: AgentProviderDefinition[]
 ): Map<AgentProvider, AgentProviderDefinition> {
@@ -67,6 +119,8 @@ function makeProviderMap(
 const codexProviderMap = makeProviderMap(TEST_CODEX_DEFINITION);
 const claudeProviderMap = makeProviderMap(TEST_CLAUDE_DEFINITION);
 const bothProviderMap = makeProviderMap(TEST_CODEX_DEFINITION, TEST_CLAUDE_DEFINITION);
+const cursorProviderMap = makeProviderMap(TEST_CURSOR_DEFINITION);
+const cursorSdkProviderMap = makeProviderMap(TEST_CURSOR_SDK_DEFINITION);
 
 function makeState(
   overrides: Partial<AgentFormReducerState["form"]> = {},
@@ -163,6 +217,55 @@ describe("resolveThinkingOptionId", () => {
         requestedThinkingOptionId: "",
       }),
     ).toBe("low");
+  });
+
+  it("keeps Cursor SDK thinking unset when no explicit valid option is requested", () => {
+    expect(
+      resolveThinkingOptionId({
+        availableModels: CURSOR_SDK_MODELS,
+        modelId: "sdk:gpt-5.5:context=1m",
+        requestedThinkingOptionId: "",
+      }),
+    ).toBe("");
+    expect(
+      resolveThinkingOptionId({
+        availableModels: CURSOR_SDK_MODELS,
+        modelId: "sdk:gpt-5.5:context=1m",
+        requestedThinkingOptionId: "invalid",
+      }),
+    ).toBe("");
+  });
+});
+
+describe("resolveAgentForm provider changes", () => {
+  it("does not invent Cursor SDK model or thinking defaults when the user selects the provider", () => {
+    const resolved = resolveAgentForm(makeState(), {
+      type: "SET_PROVIDER_FROM_USER",
+      provider: "cursor-sdk",
+      providerModels: CURSOR_SDK_MODELS,
+      providerDef: TEST_CURSOR_SDK_DEFINITION,
+      providerPrefs: undefined,
+    });
+
+    expect(resolved.form.provider).toBe("cursor-sdk");
+    expect(resolved.form.modeId).toBe("yolo");
+    expect(resolved.form.model).toBe("");
+    expect(resolved.form.thinkingOptionId).toBe("");
+  });
+
+  it("preserves Cursor ACP default model and thinking behavior when the user selects Cursor", () => {
+    const resolved = resolveAgentForm(makeState(), {
+      type: "SET_PROVIDER_FROM_USER",
+      provider: "cursor",
+      providerModels: CURSOR_MODELS,
+      providerDef: TEST_CURSOR_DEFINITION,
+      providerPrefs: undefined,
+    });
+
+    expect(resolved.form.provider).toBe("cursor");
+    expect(resolved.form.modeId).toBe("agent");
+    expect(resolved.form.model).toBe("default");
+    expect(resolved.form.thinkingOptionId).toBe("medium");
   });
 });
 
@@ -438,6 +541,60 @@ describe("resolveFormState", () => {
 
     expect(resolved.model).toBe("default");
     expect(resolved.thinkingOptionId).toBe("low");
+  });
+
+  it("clears removed Cursor SDK model preferences instead of falling back to an SDK default context", () => {
+    const resolved = resolveFormState(
+      undefined,
+      {
+        provider: "cursor-sdk",
+        providerPreferences: {
+          "cursor-sdk": { model: "sdk:gpt-5.5:context=300k" },
+        },
+      },
+      CURSOR_SDK_MODELS,
+      INITIAL_USER_MODIFIED,
+      makeState({ provider: "cursor-sdk" }).form,
+
+      cursorSdkProviderMap,
+    );
+
+    expect(resolved.model).toBe("");
+    expect(resolved.thinkingOptionId).toBe("");
+  });
+
+  it("clears invalid active Cursor SDK model state after refreshed metadata changes", () => {
+    const resolved = resolveFormState(
+      undefined,
+      {},
+      CURSOR_SDK_MODELS,
+      { ...INITIAL_USER_MODIFIED, model: true },
+      makeState({
+        provider: "cursor-sdk",
+        model: "sdk:gpt-5.5:context=300k",
+        thinkingOptionId: "medium",
+      }).form,
+
+      cursorSdkProviderMap,
+    );
+
+    expect(resolved.model).toBe("");
+    expect(resolved.thinkingOptionId).toBe("");
+  });
+
+  it("preserves Cursor ACP default model and thinking fallback behavior", () => {
+    const resolved = resolveFormState(
+      undefined,
+      { provider: "cursor", providerPreferences: { cursor: { model: "missing" } } },
+      CURSOR_MODELS,
+      INITIAL_USER_MODIFIED,
+      makeState({ provider: "cursor" }).form,
+
+      cursorProviderMap,
+    );
+
+    expect(resolved.model).toBe("default");
+    expect(resolved.thinkingOptionId).toBe("medium");
   });
 
   it("clears an invalid provider instead of falling back to the first allowed provider", () => {
@@ -748,6 +905,22 @@ describe("resolveAgentForm", () => {
       expect(next.form.modeId).toBe("auto");
       expect(next.form.model).toBe("gpt-5.3-codex");
     });
+
+    it("does not pick a Cursor SDK model when selecting the provider without an explicit model", () => {
+      const state = makeState();
+      const next = resolveAgentForm(state, {
+        type: "SET_PROVIDER_FROM_USER",
+        provider: "cursor-sdk",
+        providerModels: CURSOR_SDK_MODELS,
+        providerDef: TEST_CURSOR_SDK_DEFINITION,
+        providerPrefs: undefined,
+      });
+
+      expect(next.form.provider).toBe("cursor-sdk");
+      expect(next.form.modeId).toBe("yolo");
+      expect(next.form.model).toBe("");
+      expect(next.form.thinkingOptionId).toBe("");
+    });
   });
 
   describe("SET_PROVIDER_AND_MODEL_FROM_USER", () => {
@@ -808,6 +981,21 @@ describe("resolveAgentForm", () => {
 
       expect(next.form.thinkingOptionId).toBe("xhigh");
     });
+
+    it("keeps Cursor SDK thinking unset after selecting an explicit model", () => {
+      const state = makeState();
+      const next = resolveAgentForm(state, {
+        type: "SET_PROVIDER_AND_MODEL_FROM_USER",
+        provider: "cursor-sdk",
+        modelId: "sdk:gpt-5.5:context=1m",
+        providerDef: TEST_CURSOR_SDK_DEFINITION,
+        providerModels: CURSOR_SDK_MODELS,
+      });
+
+      expect(next.form.provider).toBe("cursor-sdk");
+      expect(next.form.model).toBe("sdk:gpt-5.5:context=1m");
+      expect(next.form.thinkingOptionId).toBe("");
+    });
   });
 
   describe("SET_MODE_FROM_USER", () => {
@@ -857,6 +1045,22 @@ describe("resolveAgentForm", () => {
       });
 
       expect(next.form.model).toBe("gpt-5.3-codex");
+    });
+
+    it("clears Cursor SDK model and thinking when the selected model is no longer valid", () => {
+      const state = makeState({
+        provider: "cursor-sdk",
+        model: "sdk:gpt-5.5:context=300k",
+        thinkingOptionId: "medium",
+      });
+      const next = resolveAgentForm(state, {
+        type: "SET_MODEL_FROM_USER",
+        modelId: "sdk:gpt-5.5:context=300k",
+        availableModels: CURSOR_SDK_MODELS,
+      });
+
+      expect(next.form.model).toBe("");
+      expect(next.form.thinkingOptionId).toBe("");
     });
   });
 

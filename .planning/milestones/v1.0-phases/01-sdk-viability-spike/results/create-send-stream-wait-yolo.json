@@ -1,0 +1,40 @@
+{
+  "experiment": "create-send-stream-wait",
+  "status": "passed",
+  "recordedAt": "2026-06-13T08:32:33.635Z",
+  "environment": {
+    "node": "v22.22.3",
+    "npm": "10.9.8",
+    "packageVersion": "1.0.18",
+    "hasCursorApiKey": true,
+    "cursorApiKeySource": "provider-config"
+  },
+  "runtime": {
+    "cwd": "/tmp/paseo-cursor-sdk-create-send-wait-yolo-nYOgTe",
+    "storePath": ".planning/phases/01-sdk-viability-spike/stores/create-send-wait-yolo-d47cfda9-e394-478e-bbcc-e65c7667f86f",
+    "productionStorePathPattern": "${PASEO_HOME}/providers/cursor-sdk/stores/{paseoSessionId}",
+    "model": "composer-2.5",
+    "modeId": "yolo",
+    "sandboxEnabled": false
+  },
+  "sdk": {
+    "agentIdPrefix": "agent",
+    "agentId": "agent-e5647cfa-0818-40f6-b971-9bf39e9d3022",
+    "runId": "run-d3c63d6d-5bc1-4cf7-bb38-58421bc26364",
+    "requestId": "1604e1c0-47bc-4807-a806-d33de92a8f6c",
+    "streamEventTypeCounts": {
+      "status": 2,
+      "assistant": 16,
+      "tool_call": 5
+    },
+    "terminalStatus": "finished",
+    "resultPreview": "已在仓库中创建 `sdk-spike-result.txt`，并写入 Paseo Cursor SDK 本地生命周期探测成功的确认语句。",
+    "durationMs": 13145,
+    "model": {
+      "id": "composer-2.5"
+    }
+  },
+  "error": null,
+  "providerImpact": "Local create/send/stream/wait can map onto Paseo direct-provider turn lifecycle.",
+  "attempts": 1
+}

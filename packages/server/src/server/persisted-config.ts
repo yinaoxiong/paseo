@@ -9,6 +9,7 @@ import {
 } from "./agent/provider-launch-config.js";
 import type { AgentProviderRuntimeSettingsMap } from "./agent/provider-launch-config.js";
 import { ensurePrivateFile, writePrivateFileAtomicSync } from "./private-files.js";
+import { BUILTIN_PROVIDER_IDS } from "@getpaseo/protocol/provider-manifest";
 import { TerminalProfileSchema } from "@getpaseo/protocol/messages";
 
 export const LogLevelSchema = z.enum(["trace", "debug", "info", "warn", "error", "fatal"]);
@@ -151,8 +152,6 @@ const AgentMetadataGenerationSchema = z
     providers: z.array(StructuredGenerationProviderConfigSchema).optional(),
   })
   .strict();
-
-const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 
 function isLegacyProviderEntry(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) {

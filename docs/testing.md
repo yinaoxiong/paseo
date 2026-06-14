@@ -115,6 +115,8 @@ App-level Playwright browser E2E lives in `packages/app/e2e/*.spec.ts` and runs 
 
 Live provider smoke tests belong in `*.real.e2e.test.ts`, not `*.test.ts`, even when guarded by environment variables. Default unit suites must use deterministic provider adapters/fakes so missing credits, auth outages, and upstream model drift do not block normal CI.
 
+Cursor SDK follows this default boundary. Normal `cursor-sdk` tests use injected runtime fakes for SDK availability, model discovery, lifecycle, event mapping, persistence, and next-turn send params. They must not require a live `CURSOR_API_KEY`, network access, Cursor credits, live model metadata, or current SDK service behavior. Live Cursor SDK/API behavior belongs in explicit UAT or real-smoke evidence, with credentials supplied only through local runtime configuration and never copied into test fixtures, Markdown, JSON evidence, or persistence metadata.
+
 ### Test setup
 
 - Server: `packages/server/src/test-utils/vitest-setup.ts` loads `.env.test`, sets `PASEO_SUPERVISED=0`, and disables Git/SSH prompts. Add new global env shims here, not in individual tests.

@@ -19,6 +19,7 @@ const mockState = vi.hoisted(() => {
         env?: Record<string, string>;
         providerParams?: unknown;
       }>,
+      cursorSdk: [] as ConstructorEntry[],
       pi: [] as ConstructorEntry[],
       genericAcp: [] as Array<{
         command: string[];
@@ -35,6 +36,7 @@ const mockState = vi.hoisted(() => {
       this.constructorArgs.codex = [];
       this.constructorArgs.copilot = [];
       this.constructorArgs.cursor = [];
+      this.constructorArgs.cursorSdk = [];
       this.constructorArgs.pi = [];
       this.constructorArgs.genericAcp = [];
       this.isCommandAvailable.mockReset();
@@ -364,6 +366,48 @@ vi.mock("./providers/cursor-acp-agent.js", () => ({
   },
 }));
 
+vi.mock("./providers/cursor-sdk-agent.js", () => ({
+  CursorSdkAgentClient: class CursorSdkAgentClient {
+    readonly capabilities = {
+      supportsStreaming: true,
+      supportsSessionPersistence: true,
+      supportsDynamicModes: true,
+      supportsMcpServers: false,
+      supportsReasoningStream: true,
+      supportsToolInvocations: true,
+    };
+    readonly provider = "cursor-sdk";
+    readonly runtimeSettings?: unknown;
+
+    constructor(options: { runtimeSettings?: unknown }) {
+      this.runtimeSettings = options.runtimeSettings;
+      mockState.constructorArgs.cursorSdk.push({
+        runtimeSettings: options.runtimeSettings,
+      });
+    }
+
+    async createSession(): Promise<never> {
+      throw new Error("not implemented");
+    }
+
+    async resumeSession(): Promise<never> {
+      throw new Error("not implemented");
+    }
+
+    async listModels(): Promise<AgentModelDefinition[]> {
+      return mockState.runtimeModels.get(this.provider) ?? [];
+    }
+
+    async listModes(): Promise<[]> {
+      return [];
+    }
+
+    async isAvailable(): Promise<boolean> {
+      return true;
+    }
+  },
+}));
+
 import {
   AGENT_PROVIDER_DEFINITIONS,
   buildProviderRegistry,
@@ -380,6 +424,105 @@ test("builds registry with no overrides — same as built-in count", () => {
   const registry = buildProviderRegistry(logger);
 
   expect(Object.keys(registry)).toHaveLength(AGENT_PROVIDER_DEFINITIONS.length);
+});
+
+test("registers cursor-sdk side by side with Cursor ACP", () => {
+  const registry = buildProviderRegistry(logger);
+
+  expect(registry.cursor).toMatchObject({
+    id: "cursor",
+    label: "Cursor",
+    description: "Cursor via Agent Client Protocol with CLI login based behavior",
+    defaultModeId: "https://agentclientprotocol.com/protocol/session-modes#agent",
+    derivedFromProviderId: null,
+  });
+  expect(registry.cursor.modes).toEqual([
+    expect.objectContaining({
+      id: "https://agentclientprotocol.com/protocol/session-modes#agent",
+      label: "Agent",
+    }),
+    expect.objectContaining({
+      id: "https://agentclientprotocol.com/protocol/session-modes#plan",
+      label: "Plan",
+    }),
+  ]);
+  expect(registry["cursor-sdk"]).toMatchObject({
+    id: "cursor-sdk",
+    label: "Cursor SDK",
+    description:
+      "Requires CURSOR_API_KEY. Experimental direct Cursor SDK provider for local agents.",
+    defaultModeId: "yolo",
+    derivedFromProviderId: null,
+  });
+  expect(registry.cursor.createClient(logger).provider).toBe("cursor");
+  expect(registry["cursor-sdk"].createClient(logger).provider).toBe("cursor-sdk");
+  expect(registry.cursor.createClient(logger).capabilities.supportsMcpServers).toBe(true);
+  expect(registry["cursor-sdk"].createClient(logger).capabilities.supportsMcpServers).toBe(false);
+});
+
+test("keeps cursor-sdk provider config isolated from Cursor ACP config", () => {
+  const registry = buildProviderRegistry(logger, {
+    runtimeSettings: {
+      cursor: {
+        env: {
+          CURSOR_AGENT_LOG: "debug",
+        },
+      },
+      "cursor-sdk": {
+        env: {
+          CURSOR_API_KEY: "sdk-provider-key",
+        },
+      },
+    },
+  });
+
+  registry.cursor.createClient(logger);
+  registry["cursor-sdk"].createClient(logger);
+
+  expect(mockState.constructorArgs.cursor.at(-1)).toEqual({
+    command: ["cursor-agent", "acp"],
+    env: {
+      CURSOR_AGENT_LOG: "debug",
+    },
+    providerParams: undefined,
+  });
+  expect(mockState.constructorArgs.cursorSdk.at(-1)).toEqual({
+    runtimeSettings: {
+      env: {
+        CURSOR_API_KEY: "sdk-provider-key",
+      },
+    },
+  });
+});
+
+test("provider definitions include cursor-sdk Sandbox metadata and default unattended YOLO", () => {
+  const definition = AGENT_PROVIDER_DEFINITIONS.find((entry) => entry.id === "cursor-sdk");
+
+  expect(definition).toMatchObject({
+    id: "cursor-sdk",
+    label: "Cursor SDK",
+    description:
+      "Requires CURSOR_API_KEY. Experimental direct Cursor SDK provider for local agents.",
+    defaultModeId: "yolo",
+  });
+  expect(definition?.modes).toEqual([
+    expect.objectContaining({
+      id: "sandbox",
+      label: "Sandbox",
+      colorTier: "safe",
+      isUnattended: false,
+    }),
+    expect.objectContaining({
+      id: "yolo",
+      label: "YOLO",
+      colorTier: "dangerous",
+      isUnattended: true,
+    }),
+  ]);
+  expect(definition?.modes.map((mode) => mode.id)).toEqual(["sandbox", "yolo"]);
+  expect(definition?.modes.map((mode) => mode.id)).not.toContain("agent");
+  expect(definition?.modes.map((mode) => mode.id)).not.toContain("ask");
+  expect(definition?.modes.map((mode) => mode.id)).not.toContain("autoReview");
 });
 
 test("includes mock provider only for development builds", () => {

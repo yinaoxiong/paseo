@@ -97,6 +97,50 @@ describe("combined model selector data", () => {
     ]);
   });
 
+  it("does not synthesize a default model row for ready Cursor SDK empty metadata", () => {
+    expect(
+      buildSelectableProviderSelectorProviders([
+        snapshotEntry({
+          provider: "cursor-sdk",
+          label: "Cursor SDK",
+          models: [],
+        }),
+      ]),
+    ).toEqual([
+      {
+        id: "cursor-sdk",
+        label: "Cursor SDK",
+        modelSelection: {
+          kind: "error",
+          message: "No Cursor SDK models",
+        },
+      },
+    ]);
+  });
+
+  it("surfaces Cursor SDK model discovery errors without a synthetic default row", () => {
+    expect(
+      buildSelectableProviderSelectorProviders([
+        snapshotEntry({
+          provider: "cursor-sdk",
+          label: "Cursor SDK",
+          status: "error",
+          error: "Unable to load Cursor SDK models",
+          models: [],
+        }),
+      ]),
+    ).toEqual([
+      {
+        id: "cursor-sdk",
+        label: "Cursor SDK",
+        modelSelection: {
+          kind: "error",
+          message: "Unable to load Cursor SDK models",
+        },
+      },
+    ]);
+  });
+
   it("excludes disabled providers from selector data", () => {
     expect(
       buildSelectableProviderSelectorProviders([

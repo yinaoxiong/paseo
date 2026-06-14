@@ -1,0 +1,35 @@
+{
+  "experiment": "cancel",
+  "status": "passed",
+  "recordedAt": "2026-06-13T08:35:00.253Z",
+  "environment": {
+    "node": "v22.22.3",
+    "npm": "10.9.8",
+    "packageVersion": "1.0.18",
+    "hasCursorApiKey": true,
+    "cursorApiKeySource": "provider-config"
+  },
+  "runtime": {
+    "cwd": "/tmp/paseo-cursor-sdk-cancel-yolo-qL74JX",
+    "storePath": ".planning/phases/01-sdk-viability-spike/stores/cancel-yolo-15334226-0732-41ba-92b1-48908c867e69",
+    "model": "composer-2.5",
+    "modeId": "yolo",
+    "sandboxEnabled": false
+  },
+  "sdk": {
+    "agentIdPrefix": "agent",
+    "agentId": "agent-f0f07a54-24e2-43de-a951-1aff5461125a",
+    "runId": "run-4911d2c0-8d93-47ae-89d9-ac4eb5ed1ad0",
+    "requestId": "094c4cd0-78ed-455a-a0e2-60b2ea9fc025",
+    "streamEventTypeCounts": {
+      "status": 2
+    },
+    "terminalStatus": "cancelled",
+    "durationMs": 7519
+  },
+  "supportsCancel": true,
+  "cancelIssued": true,
+  "error": null,
+  "providerImpact": "Cancellation behavior can be mapped to Paseo interrupt semantics, with terminal status recorded.",
+  "attempts": 1
+}
