@@ -276,6 +276,26 @@ describe("provider overrides (new format)", () => {
     });
   });
 
+  test("override cursor-sdk built-in provider with env only", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: {
+        providers: {
+          "cursor-sdk": {
+            env: {
+              CURSOR_API_KEY: "sk-test",
+            },
+          },
+        },
+      },
+    });
+
+    expect(parsed.agents?.providers?.["cursor-sdk"]).toEqual({
+      env: {
+        CURSOR_API_KEY: "sk-test",
+      },
+    });
+  });
+
   test("new provider extending claude with label", () => {
     const parsed = PersistedConfigSchema.parse({
       agents: {

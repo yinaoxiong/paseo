@@ -1,0 +1,25 @@
+{
+  "experiment": "resume-followup",
+  "status": "blocked",
+  "recordedAt": "2026-06-13T08:33:05.847Z",
+  "environment": {
+    "node": "v22.22.3",
+    "npm": "10.9.8",
+    "packageVersion": "1.0.18",
+    "hasCursorApiKey": true,
+    "cursorApiKeySource": "provider-config"
+  },
+  "resumeSuccess": false,
+  "continuityAssertion": {
+    "status": "blocked",
+    "reason": "resume-create did not produce a live SDK agent handle"
+  },
+  "sdk": {
+    "agentIdPrefix": null,
+    "streamEventTypeCounts": {},
+    "terminalStatus": "blocked_auth"
+  },
+  "error": null,
+  "providerImpact": "Cross-process Agent.resume follow-up could not be live-verified without CURSOR_API_KEY; Phase 2 must treat availability/auth diagnostics as a first-class provider state.",
+  "attempts": 0
+}

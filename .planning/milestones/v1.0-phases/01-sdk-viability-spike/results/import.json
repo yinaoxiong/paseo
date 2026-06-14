@@ -1,0 +1,34 @@
+{
+  "experiment": "dependency-import",
+  "status": "passed",
+  "recordedAt": "2026-06-13T08:31:47.443Z",
+  "packageVersion": "1.0.18",
+  "installCommand": "npm install --workspace=@getpaseo/server --ignore-scripts @cursor/sdk",
+  "ignoreScripts": true,
+  "node": "v22.22.3",
+  "npm": "10.9.8",
+  "hasCursorApiKey": true,
+  "dependencyTree": {
+    "serverWorkspace": "@getpaseo/server",
+    "cursorSdkVersion": "1.0.18"
+  },
+  "exportedNames": {
+    "Agent": true,
+    "Cursor": true,
+    "JsonlLocalAgentStore": true
+  },
+  "notes": [
+    "Package metadata read from node_modules because @cursor/sdk does not export ./package.json.",
+    "Static @cursor/sdk import loaded sqlite3; --ignore-scripts install needed npm rebuild sqlite3 before the import probe could run."
+  ],
+  "cursorApiKeySource": "provider-config",
+  "staticImport": {
+    "module": "@cursor/sdk",
+    "imported": ["Agent", "Cursor", "JsonlLocalAgentStore"]
+  },
+  "lifecycleScripts": {
+    "initialIgnoreScriptsImport": "failed: sqlite3 native binding missing",
+    "correctionCommand": "npm rebuild sqlite3",
+    "correctionResult": "passed"
+  }
+}

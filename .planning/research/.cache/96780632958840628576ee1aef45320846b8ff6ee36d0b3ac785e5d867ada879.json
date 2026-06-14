@@ -1,0 +1,9 @@
+{
+  "content": "Official Cursor TypeScript SDK docs identify @cursor/sdk and document top-level model discovery via Cursor.models.list, with SDK model objects including ids and params used in send-time model options. Phase 3 should use SDK model discovery as source of truth rather than synthetic rows or scratch sessions.",
+  "source": "web",
+  "provider": "websearch",
+  "confidence": "MEDIUM",
+  "fetched_at": "2026-06-13T14:23:44.846Z",
+  "ttl": 86400000,
+  "kind": "docs"
+}

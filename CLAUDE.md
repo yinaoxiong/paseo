@@ -82,6 +82,10 @@ This checkout may be used as a private integration branch.
 - Upstream PR branches must be created from `origin/main`, not from `personal/stable`.
 - Personal-only files such as `.planning/` and `.devcontainer/` must not be included in upstream PRs.
 - Private builds must run inside the container defined by `/mnt/private_yax_qy4/projects/paseo/.devcontainer`.
+- Dependency install/update, formatting, linting, typechecking, tests, build verification, and dependency-backed commit hooks must run inside that devcontainer, not on the host checkout. The devcontainer mounts `node_modules` as Docker volumes; host-side `node_modules` should be removed if they appear.
+- Local Android APK smoke builds are the exception to the devcontainer rule: use the dedicated Docker builder flow in [docs/android.md](docs/android.md) (`npm run android:builder:image`, then `npm run android:apk:arm64`). It keeps Android SDK/NDK/CMake in a cached builder image, builds from a temporary `.local-build` workspace, uses Docker volumes for `node_modules` and Gradle caches, and outputs an arm64-only debug-signed APK for testing.
+- Do not inspect dependency progress with recursive `node_modules` scans such as `du -sh node_modules`, `find node_modules`, or broad recursive `ls`; first-time container installs can be quiet but still active. Check the npm process, npm logs, or specific binaries such as `node_modules/.bin/oxfmt` and `node_modules/.bin/tsgo`.
+- Keep Cursor agent attribution disabled for local commits and PRs: `~/.cursor/cli-config.json` should set `attribution.attributeCommitsToAgent=false` and `attribution.attributePRsToAgent=false`. Cursor Desktop has the same controls under `Cursor Settings > Agent > Attribution`.
 - Personal CLI tarballs for daily use should be fully bundled so `npm install -g <tgz>` installs the local server/runtime dependencies, not registry copies.
 - To use an upstream PR locally, cherry-pick the clean PR commit into `personal/stable` with `-x`.
 - To upstream private work, extract a clean `pr/<topic>` branch from `origin/main`, then cherry-pick or patch only the relevant commits.
@@ -99,12 +103,12 @@ This checkout may be used as a private integration branch.
   - If you must run a broad suite, pipe output to a file and read it afterward: `npx vitest run <file> --bail=1 > /tmp/test-output.txt 2>&1` then read the file.
   - Never re-run a test suite that another agent already ran and reported green — trust the result.
   - For full suite verification, push to CI and check GitHub Actions instead.
-- **Always run typecheck and lint after every change.**
+- **Always run typecheck and lint after every change, inside the devcontainer.**
 - **Build workspace packages before diagnosing cross-package type errors.** This repo consumes generated declarations across workspaces. If typecheck fails in a package that depends on another workspace, rebuild the owning stack first so `dist` declarations are current:
   - `npm run build:client` — rebuild protocol and client declarations.
   - `npm run build:server` — rebuild highlight, relay, protocol, client, server, and CLI when server/CLI types may be stale.
   - Do not patch inferred callback parameters or add local duplicate types just to silence stale declaration errors.
-- **Run `npm run format` before committing.** This repo uses Biome for formatting. Do not manually fix formatting — let the formatter handle it.
+- **Run `npm run format` before committing, inside the devcontainer.** This repo uses `oxfmt` for formatting. Do not manually fix formatting — let the formatter handle it.
 - **Always use npm scripts for linting and formatting.** Do not run tools directly with `npx eslint`, `npx oxfmt`, `npx oxlint`, or package-local binaries. For targeted checks, pass file paths through the npm script:
   - `npm run lint -- packages/app/src/components/message.tsx`
   - `npm run format:files -- CLAUDE.md packages/app/src/components/message.tsx`

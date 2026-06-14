@@ -235,6 +235,13 @@ function toThinkingControlOptions(options: AgentControlOption[] | undefined): Ag
   }));
 }
 
+function getThinkingFallbackLabel(provider: string, options: AgentControlOption[], title: string) {
+  if (provider === "cursor-sdk") {
+    return title;
+  }
+  return options[0]?.label ?? title;
+}
+
 function buildFallbackModelSelectorProviders(
   provider: string,
   modelOptions: AgentControlOption[] | undefined,
@@ -458,7 +465,7 @@ function ControlledAgentControls({
   const displayThinking = findOptionLabel(
     formattedThinkingOptions,
     selectedThinkingOptionId,
-    formattedThinkingOptions[0]?.label ?? t("agentControls.thinking.unknown"),
+    getThinkingFallbackLabel(provider, formattedThinkingOptions, t("agentControls.thinking.title")),
   );
 
   const hasAnyControl = resolveHasAnyControl({
@@ -1687,8 +1694,7 @@ export function DraftAgentControls({
     [preferences.favoriteModels],
   );
 
-  const effectiveSelectedThinkingOption =
-    selectedThinkingOptionId || mappedThinkingOptions[0]?.id || undefined;
+  const effectiveSelectedThinkingOption = selectedThinkingOptionId || undefined;
 
   const modelOptions = useMemo<AgentControlOption[]>(
     () =>

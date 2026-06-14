@@ -1,0 +1,61 @@
+{
+  "experiment": "auth-config-errors",
+  "status": "passed",
+  "recordedAt": "2026-06-13T08:31:53.873Z",
+  "environment": {
+    "node": "v22.22.3",
+    "npm": "10.9.8",
+    "packageVersion": "1.0.18",
+    "hasCursorApiKey": true,
+    "cursorApiKeySource": "provider-config"
+  },
+  "probes": [
+    {
+      "operation": "Cursor.me missing key",
+      "status": "passed",
+      "expectedFailure": true,
+      "error": {
+        "className": "u",
+        "name": "ConfigurationError",
+        "message": "API key is required for cloud operations. Caller passed an empty apiKey explicitly; refusing to fall back to CURSOR_API_KEY.",
+        "code": "unauthenticated",
+        "isRetryable": false,
+        "operation": "Cursor.me"
+      },
+      "providerImpact": "Provider can expose this SDK startup/config/auth failure as an availability or turn diagnostic."
+    },
+    {
+      "operation": "Cursor.me invalid key",
+      "status": "passed",
+      "expectedFailure": true,
+      "error": {
+        "className": "o",
+        "name": "AuthenticationError",
+        "message": "Invalid User API Key",
+        "code": "error",
+        "status": 401,
+        "isRetryable": false,
+        "operation": "Cursor.me",
+        "endpoint": "GET /v1/me"
+      },
+      "providerImpact": "Provider can expose this SDK startup/config/auth failure as an availability or turn diagnostic."
+    },
+    {
+      "operation": "Agent.create invalid model",
+      "status": "passed",
+      "expectedFailure": true,
+      "error": {
+        "className": "u",
+        "name": "ConfigurationError",
+        "message": "Cannot use this model: paseo-invalid-model-for-sdk-spike. Available models: default, composer-2.5, claude-fable-5, claude-opus-4-8, gpt-5.5, claude-sonnet-4-6, composer-2, gpt-5.3-codex, claude-opus-4-7, grok-build-0.1, gpt-5.4, claude-opus-4-6, claude-opus-4-5, gpt-5.2, gemini-3.1-pro, gpt-5.4-mini, gpt-5.4-nano, claude-haiku-4-5, grok-4.3, claude-sonnet-4-5, gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1, gemini-3-flash, gemini-3.5-flash, gpt-5.1-codex-mini, claude-sonnet-4, gpt-5-mini, gemini-2.5-flash, kimi-k2.5. Use Cursor.models.list() to discover valid selections.",
+        "isRetryable": false,
+        "operation": "Agent.create"
+      },
+      "providerImpact": "Provider can map invalid model/config failures before a run exists without creating a production session."
+    }
+  ],
+  "notes": [
+    "Missing and invalid key probes are startup/auth failures before a run exists.",
+    "Invalid-model probe attempted with real key from configured source."
+  ]
+}

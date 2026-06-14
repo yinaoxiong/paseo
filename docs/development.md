@@ -5,6 +5,42 @@
 - Node.js (see `.tool-versions` for exact version)
 - npm workspaces (comes with Node)
 
+## Dependency and validation environment
+
+Run all dependency-related commands inside the devcontainer defined by `.devcontainer/devcontainer.json`. This includes `npm install`, `npm ci`, package updates, formatting, linting, typechecking, tests, build verification, and any commit hook run that depends on those tools.
+
+Do not install or verify dependencies directly on the host checkout. The devcontainer mounts every `node_modules` path as a Docker named volume (`paseo-nm-*`), so dependencies stay off the bind-mounted working tree. If host-side `node_modules` directories appear, remove them and rerun the command in the devcontainer.
+
+Inside the container, the workspace path is `/workspaces/paseo`. Run repo scripts from there, for example:
+
+```bash
+npm run format:files -- docs/development.md
+npm run lint
+npm run typecheck
+```
+
+When checking whether the container dependency volume is ready, probe for the specific tool you need instead of scanning `node_modules`:
+
+```bash
+test -x node_modules/.bin/oxfmt
+test -x node_modules/.bin/tsgo
+```
+
+Do not diagnose dependency progress by recursively scanning `node_modules`. Avoid `du -sh node_modules`, recursive `ls`, `find`, or similar full-tree walks; this repo has many small dependency files and those commands can look hung on the bind mount or Docker volumes. If a first-time container install appears stuck, check the npm process (`ps` elapsed time and CPU), npm logs, or whether the expected binary has appeared.
+
+Cursor attribution should stay disabled for local agent-created commits and PRs. In Cursor CLI, keep this in `~/.cursor/cli-config.json`:
+
+```json
+{
+  "attribution": {
+    "attributeCommitsToAgent": false,
+    "attributePRsToAgent": false
+  }
+}
+```
+
+In Cursor Desktop, the matching setting is under `Cursor Settings > Agent > Attribution`; turn off commit and PR attribution there as well.
+
 ## Running the dev server
 
 ```bash
@@ -117,6 +153,32 @@ testing an isolated instance on non-default ports.
 When running a dedicated Electron QA instance against a non-default Expo port, set
 `EXPO_DEV_URL` explicitly. Desktop main defaults to `http://localhost:8081`, so
 `PASEO_PORT=57928` alone starts Metro on 57928 but Electron still loads 8081.
+
+### Personal macOS arm64 app directory from Linux
+
+For personal smoke packaging only, Linux can ask electron-builder to assemble an unsigned macOS
+arm64 `.app` directory:
+
+```bash
+npm run desktop:mac:dir:arm64
+```
+
+This builds the desktop renderer and bundled daemon, then runs electron-builder with:
+
+```bash
+--mac dir --arm64 -c.mac.identity=null -c.mac.notarize=false --publish=never
+```
+
+The output is:
+
+```text
+packages/desktop/release/mac-arm64/Paseo.app
+```
+
+This is not a formal macOS release build. Linux can assemble the `.app` and download the darwin
+arm64 Electron runtime, but electron-builder skips macOS application signing on Linux. The result is
+unsigned and not notarized; copy it to a Mac for launch testing, and expect Gatekeeper to require a
+manual override. Use the macOS release workflow for signed/notarized `.dmg` or `.zip` artifacts.
 
 ### React render profiling
 

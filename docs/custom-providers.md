@@ -35,7 +35,7 @@ Provider IDs must be lowercase alphanumeric with hyphens (`/^[a-z][a-z0-9-]*$/`)
 
 ## Extending a built-in provider
 
-Use `extends` to create a new provider entry that inherits from a built-in provider (claude, codex, copilot, opencode, pi, omp). The new provider gets its own entry in the provider list, with its own label, environment, and model definitions.
+Use `extends` to create a new provider entry that inherits from a built-in provider (claude, codex, copilot, cursor-sdk, opencode, pi, omp). The new provider gets its own entry in the provider list, with its own label, environment, and model definitions.
 
 ```json
 {
@@ -61,6 +61,30 @@ Required fields for custom providers:
 - `label` — display name in the UI
 
 See [Codex with a custom OpenAI-compatible endpoint](#codex-with-a-custom-openai-compatible-endpoint) below for the dedicated Codex example.
+
+### Cursor SDK custom entries
+
+Custom providers that extend `"cursor-sdk"` inherit the direct Cursor SDK provider behavior, not Cursor ACP behavior. Each entry must supply its own runtime environment, including `CURSOR_API_KEY` when the daemon environment does not provide it:
+
+```json
+{
+  "agents": {
+    "providers": {
+      "cursor-sdk-work": {
+        "extends": "cursor-sdk",
+        "label": "Cursor SDK (Work)",
+        "env": {
+          "CURSOR_API_KEY": "<set-this-outside-git>"
+        }
+      }
+    }
+  }
+}
+```
+
+`cursor-sdk` entries do not inherit credentials, commands, modes, or MCP behavior from the catalog Cursor ACP provider (`cursor`) or from `extends: "acp"` providers. Keep real key values in local runtime config or the daemon environment only; do not commit them to repo files, planning artifacts, Markdown evidence, or provider persistence metadata.
+
+Cursor ACP and generic `extends: "acp"` providers can receive Paseo's injected MCP server when their adapter supports `mcpServers`. Cursor SDK cannot. The direct SDK provider currently has no stable MCP/custom-tool injection path and keeps `supportsMcpServers: false`, so `params.supportsMcpServers`, ACP MCP injection settings, and Cursor ACP `cursor/ask_question` notes do not make SDK-side MCP tools available.
 
 ---
 
@@ -718,7 +742,7 @@ Use `disallowedTools` to disable unsupported tools:
 
 ### Valid `extends` values
 
-Built-in providers: `claude`, `codex`, `copilot`, `opencode`, `pi`, `omp`
+Built-in providers: `claude`, `codex`, `copilot`, `cursor-sdk`, `opencode`, `pi`, `omp`
 
 Special value: `acp` — creates a generic ACP provider (requires `command`)
 

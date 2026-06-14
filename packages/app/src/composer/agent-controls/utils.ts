@@ -83,6 +83,10 @@ export function formatThinkingOptionLabel(option: ControlLabelInput): string {
   const compactId = option.id.replace(/[\s_-]+/g, "").toLowerCase();
   const compactLabel = rawLabel.replace(/[\s_-]+/g, "").toLowerCase();
 
+  if (rawLabel === "Thinking On" || rawLabel === "Thinking Off") {
+    return rawLabel;
+  }
+
   if (compactId === "xhigh" || compactLabel === "xhigh") {
     return i18n.t("agentControls.thinking.extraHigh");
   }
@@ -104,6 +108,10 @@ function getFallbackModel(models: AgentModelDefinition[] | null): AgentModelDefi
   return models?.find((model) => model.isDefault) ?? models?.[0] ?? null;
 }
 
+function requiresExplicitModelSelection(models: AgentModelDefinition[] | null): boolean {
+  return models?.some((model) => model.provider === "cursor-sdk") ?? false;
+}
+
 function resolvePreferredModelId(
   runtimeSelectedModel: AgentModelDefinition | null,
   normalizedConfiguredModelId: string | null,
@@ -117,10 +125,16 @@ function pickSelectedModel(
   preferredModelId: string | null,
   fallbackModel: AgentModelDefinition | null,
 ): AgentModelDefinition | null {
-  if (!models || !preferredModelId) {
+  if (!models) {
     return fallbackModel;
   }
-  return findModelById(models, preferredModelId) ?? fallbackModel;
+  if (!preferredModelId) {
+    return requiresExplicitModelSelection(models) ? null : fallbackModel;
+  }
+  return (
+    findModelById(models, preferredModelId) ??
+    (requiresExplicitModelSelection(models) ? null : fallbackModel)
+  );
 }
 
 function resolveThinkingId(
@@ -130,6 +144,9 @@ function resolveThinkingId(
   if (explicitThinkingOptionId && explicitThinkingOptionId !== "default") {
     return explicitThinkingOptionId;
   }
+  if (selectedModel?.provider === "cursor-sdk") {
+    return null;
+  }
   return selectedModel?.defaultThinkingOptionId ?? null;
 }
 
@@ -138,9 +155,13 @@ type ThinkingOption = NonNullable<AgentModelDefinition["thinkingOptions"]>[numbe
 function resolveEffectiveThinking(
   thinkingOptions: ThinkingOption[] | null,
   resolvedThinkingId: string | null,
+  selectedModel: AgentModelDefinition | null,
 ): ThinkingOption | null {
   const selectedThinking =
     thinkingOptions?.find((option) => option.id === resolvedThinkingId) ?? null;
+  if (selectedModel?.provider === "cursor-sdk") {
+    return selectedThinking;
+  }
   return selectedThinking ?? thinkingOptions?.[0] ?? null;
 }
 
@@ -191,17 +212,22 @@ export function resolveAgentModelSelection(input: {
   );
   const fallbackModel = getFallbackModel(models);
   const selectedModel = pickSelectedModel(models, preferredModelId, fallbackModel);
+  const displayFallbackModel = requiresExplicitModelSelection(models) ? null : fallbackModel;
 
   const { activeModelId, displayModel } = resolveModelDisplay(
     selectedModel,
     preferredModelId,
-    fallbackModel,
+    displayFallbackModel,
     i18n.t("agentControls.model.unknown"),
   );
 
   const thinkingOptions = selectedModel?.thinkingOptions ?? null;
   const resolvedThinkingId = resolveThinkingId(explicitThinkingOptionId, selectedModel);
-  const effectiveThinking = resolveEffectiveThinking(thinkingOptions, resolvedThinkingId);
+  const effectiveThinking = resolveEffectiveThinking(
+    thinkingOptions,
+    resolvedThinkingId,
+    selectedModel,
+  );
   const selectedThinkingId = effectiveThinking?.id ?? null;
   const displayThinking = resolveThinkingDisplay(
     effectiveThinking,

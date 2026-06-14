@@ -1,0 +1,36 @@
+{
+  "experiment": "create-send-stream-wait",
+  "status": "failed",
+  "recordedAt": "2026-06-13T08:32:10.501Z",
+  "environment": {
+    "node": "v22.22.3",
+    "npm": "10.9.8",
+    "packageVersion": "1.0.18",
+    "hasCursorApiKey": true,
+    "cursorApiKeySource": "provider-config"
+  },
+  "runtime": {
+    "cwd": "/tmp/paseo-cursor-sdk-create-send-wait-sandbox-HGy1gf",
+    "storePath": ".planning/phases/01-sdk-viability-spike/stores/create-send-wait-sandbox-7f09e90c-60e1-406a-b47d-97e115c54538",
+    "productionStorePathPattern": "${PASEO_HOME}/providers/cursor-sdk/stores/{paseoSessionId}",
+    "model": "composer-2.5",
+    "modeId": "sandbox",
+    "sandboxEnabled": true,
+    "autoReview": false
+  },
+  "sdk": {
+    "agentIdPrefix": "agent",
+    "agentId": "agent-f9842eb4-c1ed-42ce-91d0-c007b0488c98",
+    "streamEventTypeCounts": {},
+    "terminalStatus": "thrown"
+  },
+  "error": {
+    "className": "u",
+    "name": "ConfigurationError",
+    "message": "Local SDK sandboxing was requested, but sandboxing is not supported in this environment. Disable local.sandboxOptions.enabled or remove ~/.cursor/sandbox.json to run without sandboxing.",
+    "isRetryable": false,
+    "operation": "agent.send"
+  },
+  "providerImpact": "sandbox create/send/stream/wait lifecycle needs design adjustment before production provider implementation.",
+  "attempts": 1
+}

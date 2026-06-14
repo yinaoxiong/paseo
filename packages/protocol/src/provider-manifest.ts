@@ -125,6 +125,25 @@ const COPILOT_MODES: AgentProviderModeDefinition[] = [
   },
 ];
 
+const CURSOR_SDK_MODES: AgentProviderModeDefinition[] = [
+  {
+    id: "sandbox",
+    label: "Sandbox",
+    description: "Run Cursor SDK local agents with sandboxing enabled when supported.",
+    icon: "ShieldCheck",
+    colorTier: "safe",
+    isUnattended: false,
+  },
+  {
+    id: "yolo",
+    label: "YOLO",
+    description: "Run Cursor SDK local agents without sandboxing.",
+    icon: "ShieldOff",
+    colorTier: "dangerous",
+    isUnattended: true,
+  },
+];
+
 const OPENCODE_MODES: AgentProviderModeDefinition[] = [
   {
     id: "build",
@@ -218,6 +237,14 @@ export const AGENT_PROVIDER_DEFINITIONS: AgentProviderDefinition[] = [
     description: "GitHub Copilot via Agent Client Protocol with dynamic modes and session support",
     defaultModeId: "https://agentclientprotocol.com/protocol/session-modes#agent",
     modes: COPILOT_MODES,
+  },
+  {
+    id: "cursor-sdk",
+    label: "Cursor SDK",
+    description:
+      "Requires CURSOR_API_KEY. Experimental direct Cursor SDK provider for local agents.",
+    defaultModeId: "yolo",
+    modes: CURSOR_SDK_MODES,
   },
   {
     id: "opencode",
