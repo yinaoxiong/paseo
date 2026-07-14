@@ -5,7 +5,7 @@ milestone_name: Cursor SDK Provider
 status: Awaiting next milestone
 stopped_at: Phase 4 executed and verified
 last_updated: "2026-06-14T10:26:42.643Z"
-last_activity: 2026-06-14 — Milestone v1.0 completed and archived
+last_activity: 2026-07-14 — Completed quick task 260714-qaw: Cursor SDK GPT-5.5 context variant labels
 progress:
   total_phases: 4
   completed_phases: 4
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-06-14)
 Phase: Milestone v1.0 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-06-14 — Milestone v1.0 completed and archived
+Last activity: 2026-07-14 — Completed quick task 260714-qaw: Cursor SDK GPT-5.5 context variant labels
 
 ## Performance Metrics
 
@@ -110,6 +110,12 @@ None yet.
 - No stable SDK host approval API is known, so v1 should not promise Ask mode.
 - Current devcontainer does not support Cursor SDK Sandbox; the provider must fail closed instead of downgrading Sandbox to YOLO.
 - Cursor SDK model discovery depends on external Cursor API/account availability and should remain explicit UAT or real-smoke evidence, not a default deterministic test gate.
+
+### Quick Tasks Completed
+
+| #          | Description                                   | Date       | Commit    | Status   | Directory                                                                  |
+| ---------- | --------------------------------------------- | ---------- | --------- | -------- | -------------------------------------------------------------------------- |
+| 260714-qaw | Fix Cursor SDK GPT-5.5 context variant labels | 2026-07-14 | efca3edb9 | Verified | [260714-qaw](./quick/260714-qaw-cursor-sdk-gpt-5-5-272k-1m-variants-curs/) |
 
 ## Deferred Items
 

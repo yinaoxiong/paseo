@@ -47,13 +47,37 @@ const SDK_MODELS = [
     ],
     variants: [
       {
-        displayName: "272K",
-        params: [{ id: "context", value: "272k" }],
+        displayName: "GPT-5.5",
+        params: [
+          { id: "context", value: "272k" },
+          { id: "reasoning", value: "none" },
+          { id: "fast", value: "false" },
+        ],
+        isDefault: true,
       },
       {
-        displayName: "1M",
-        params: [{ id: "context", value: "1m" }],
-        isDefault: true,
+        displayName: "GPT-5.5",
+        params: [
+          { id: "fast", value: "true" },
+          { id: "context", value: "272k" },
+          { id: "reasoning", value: "low" },
+        ],
+      },
+      {
+        displayName: "GPT-5.5",
+        params: [
+          { id: "context", value: "1m" },
+          { id: "reasoning", value: "none" },
+          { id: "fast", value: "false" },
+        ],
+      },
+      {
+        displayName: "GPT-5.5",
+        params: [
+          { id: "context", value: "1m" },
+          { id: "reasoning", value: "extra-high" },
+          { id: "fast", value: "true" },
+        ],
       },
     ],
   },
@@ -93,18 +117,25 @@ describe("Cursor SDK model options", () => {
     ]);
     expect(rows.map((row) => row.id)).not.toContain("gpt-5.5");
     expect(rows.every((row) => row.provider === "cursor-sdk")).toBe(true);
+    expect(new Set(rows.map((row) => row.label)).size).toBe(rows.length);
   });
 
-  test("decodes expanded ids back to SDK ModelSelection without delimiter splitting", () => {
-    const gptOneMillion = expandCursorSdkModels(SDK_MODELS).find(
-      (row) => row.label === "GPT-5.5 - 1M",
+  test("decodes composite-variant context rows without adding reasoning or fast defaults", () => {
+    const gptRows = expandCursorSdkModels(SDK_MODELS).filter((row) =>
+      row.label.startsWith("GPT-5.5 - "),
     );
 
-    expect(gptOneMillion).toBeDefined();
-    expect(decodeCursorSdkModelOptionId(gptOneMillion?.id ?? "", SDK_MODELS)).toEqual({
-      id: "gpt-5.5",
-      params: [{ id: "context", value: "1m" }],
-    });
+    expect(gptRows.map((row) => decodeCursorSdkModelOptionId(row.id, SDK_MODELS))).toEqual([
+      {
+        id: "gpt-5.5",
+        params: [{ id: "context", value: "272k" }],
+      },
+      {
+        id: "gpt-5.5",
+        params: [{ id: "context", value: "1m" }],
+      },
+    ]);
+    expect(gptRows[0]?.id).not.toBe(gptRows[1]?.id);
   });
 
   test("maps reasoning, effort, and boolean thinking while preserving raw SDK values", () => {

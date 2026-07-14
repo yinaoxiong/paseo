@@ -212,12 +212,14 @@ function findMatchingVariant(
   params: readonly CursorSdkModelParameterValue[],
 ): CursorSdkModelVariant | null {
   return (
-    model.variants?.find((variant) =>
-      params.every((parameter) =>
-        variant.params.some(
-          (candidate) => candidate.id === parameter.id && candidate.value === parameter.value,
+    model.variants?.find(
+      (variant) =>
+        variant.params.length === params.length &&
+        params.every((parameter) =>
+          variant.params.some(
+            (candidate) => candidate.id === parameter.id && candidate.value === parameter.value,
+          ),
         ),
-      ),
     ) ?? null
   );
 }
