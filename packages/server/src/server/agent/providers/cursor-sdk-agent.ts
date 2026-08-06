@@ -223,7 +223,8 @@ class CursorSdkAgentSession implements AgentSession {
 
     const turnId = randomUUID();
     const promptText = this.toPromptText(prompt);
-    const messageId = options?.messageId ?? `cursor-sdk-user-${turnId}`;
+    const clientMessageId = options?.clientMessageId;
+    const messageId = clientMessageId ?? `cursor-sdk-user-${turnId}`;
     this.activeForegroundTurnId = turnId;
     this.recentStreamDiagnostic = null;
     this.emit({ type: "turn_started", provider: this.provider, turnId });
@@ -231,7 +232,12 @@ class CursorSdkAgentSession implements AgentSession {
       type: "timeline",
       provider: this.provider,
       turnId,
-      item: { type: "user_message", text: promptText, messageId },
+      item: {
+        type: "user_message",
+        text: promptText,
+        messageId,
+        ...(clientMessageId ? { clientMessageId } : {}),
+      },
     });
     this.scheduleSendAndPump(promptText, turnId);
 

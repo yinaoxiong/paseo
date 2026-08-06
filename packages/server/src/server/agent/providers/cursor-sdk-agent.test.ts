@@ -1297,17 +1297,27 @@ describe("CursorSdkAgentClient", () => {
     );
     const { events, waitForTerminal } = collectSessionEvents(session);
 
-    await session.startTurn("hello", { messageId: "paseo-message-1" });
+    await session.startTurn("hello", { clientMessageId: "paseo-message-1" });
     await waitForTerminal;
 
     const timelineItems = events
       .filter((event) => event.type === "timeline")
       .map((event) => event.item);
     expect(timelineItems.filter((item) => item.type === "user_message")).toEqual([
-      { type: "user_message", text: "hello", messageId: "paseo-message-1" },
+      {
+        type: "user_message",
+        text: "hello",
+        messageId: "paseo-message-1",
+        clientMessageId: "paseo-message-1",
+      },
     ]);
     expect(timelineItems).toEqual([
-      { type: "user_message", text: "hello", messageId: "paseo-message-1" },
+      {
+        type: "user_message",
+        text: "hello",
+        messageId: "paseo-message-1",
+        clientMessageId: "paseo-message-1",
+      },
       { type: "assistant_message", text: "assistant answer" },
       { type: "reasoning", text: "checking context" },
       {
@@ -1355,7 +1365,7 @@ describe("CursorSdkAgentClient", () => {
     );
     const { events, waitForTerminal } = collectSessionEvents(session);
 
-    const result = await session.startTurn("hello", { messageId: "paseo-message-1" });
+    const result = await session.startTurn("hello", { clientMessageId: "paseo-message-1" });
 
     expect(result.turnId).toBeTruthy();
     expect(events.map((event) => event.type)).toEqual(["turn_started", "timeline"]);
@@ -1387,7 +1397,7 @@ describe("CursorSdkAgentClient", () => {
     );
     const { waitForTerminal } = collectSessionEvents(session);
 
-    await session.startTurn("hello", { messageId: "paseo-message-1" });
+    await session.startTurn("hello", { clientMessageId: "paseo-message-1" });
     const failed = await waitForTerminal;
 
     expect(failed).toMatchObject({
@@ -1421,7 +1431,7 @@ describe("CursorSdkAgentClient", () => {
     );
     const { waitForTerminal } = collectSessionEvents(session);
 
-    await session.startTurn("hello", { messageId: "paseo-message-1" });
+    await session.startTurn("hello", { clientMessageId: "paseo-message-1" });
     await waitForCondition(() => run.waitCalls > 0);
     run.waitResult.reject(
       new Error("wait failed with provider-secret-key authorization: Bearer sk-live-secret-token"),
@@ -1526,11 +1536,16 @@ describe("CursorSdkAgentClient", () => {
       { agentId: "paseo-agent-123" },
     );
 
-    const result = await session.run("hello", { messageId: "paseo-message-1" });
+    const result = await session.run("hello", { clientMessageId: "paseo-message-1" });
 
     expect(result.finalText).toBe("final answer");
     expect(result.timeline.filter((item) => item.type === "user_message")).toEqual([
-      { type: "user_message", text: "hello", messageId: "paseo-message-1" },
+      {
+        type: "user_message",
+        text: "hello",
+        messageId: "paseo-message-1",
+        clientMessageId: "paseo-message-1",
+      },
     ]);
   });
 
@@ -1568,7 +1583,7 @@ describe("CursorSdkAgentClient", () => {
     );
     const first = collectSessionEvents(session);
 
-    await session.startTurn("fail once", { messageId: "paseo-message-1" });
+    await session.startTurn("fail once", { clientMessageId: "paseo-message-1" });
     const failed = await first.waitForTerminal;
 
     expect(failed).toMatchObject({
@@ -1586,7 +1601,9 @@ describe("CursorSdkAgentClient", () => {
       status: "paused" as RunResult["status"],
     });
     const second = collectSessionEvents(session);
-    await session.startTurn("fail with unknown terminal", { messageId: "paseo-message-2" });
+    await session.startTurn("fail with unknown terminal", {
+      clientMessageId: "paseo-message-2",
+    });
     const unknown = await second.waitForTerminal;
 
     expect(unknown).toMatchObject({
