@@ -113,6 +113,25 @@ retarget the PR to `next` and preserve that destination through delivery. Follow
 [release branch discipline](docs/release.md#release-branch-discipline) for creating
 and updating `next`, integrating it after a release, and releasing a hotfix from a tag.
 
+## Private Fork Workflow
+
+This checkout may be used as a private integration branch.
+
+- Keep `/mnt/private_yax_qy4/projects/paseo` on `personal/stable` for private daily use.
+- Keep upstream PR branches in separate worktrees, usually under `/data/home/root/.paseo/worktrees/...`.
+- Upstream PR branches must be created from `origin/main`, not from `personal/stable`.
+- Personal-only files such as `.planning/` and `.devcontainer/` must not be included in upstream PRs.
+- Private builds must run inside the container defined by `/mnt/private_yax_qy4/projects/paseo/.devcontainer`.
+- Use the `devcontainer` CLI for dependency install/update, formatting, linting, typechecking, tests, build verification, and dependency-backed commit hooks. Do not operate the container through raw Docker commands.
+- The devcontainer mounts `node_modules` as Docker volumes; host-side `node_modules` should be removed if they appear.
+- Local Android APK smoke builds are the exception to the devcontainer rule: use the dedicated Docker builder flow in [docs/android.md](docs/android.md) (`npm run android:builder:image`, then `npm run android:apk:arm64`).
+- Do not inspect dependency progress with recursive `node_modules` scans such as `du -sh node_modules`, `find node_modules`, or broad recursive `ls`; check the npm process, npm logs, or specific binaries instead.
+- Keep Cursor agent attribution disabled for local commits and PRs: `~/.cursor/cli-config.json` should set `attribution.attributeCommitsToAgent=false` and `attribution.attributePRsToAgent=false`.
+- Personal CLI tarballs for daily use should be fully bundled so `npm install -g <tgz>` installs the local server/runtime dependencies, not registry copies.
+- To use an upstream PR locally, cherry-pick the clean PR commit into `personal/stable` with `-x`.
+- To upstream private work, extract a clean `pr/<topic>` branch from `origin/main`, then cherry-pick or patch only the relevant commits.
+- Before opening an upstream PR, verify with `git diff origin/main...HEAD` and ensure no private workflow/config files are included.
+
 ## Critical rules
 
 - **NEVER restart the main Paseo daemon on port 6767 without permission** — it manages all running agents. If you're an agent, restarting it kills your own process.
@@ -126,12 +145,12 @@ and updating `next`, integrating it after a release, and releasing a hotfix from
   - Never re-run a test suite that another agent already ran and reported green — trust the result.
   - For full suite verification, push to CI and check GitHub Actions instead.
 - Add tests to existing suites and reuse their npm scripts and CI jobs instead of creating feature-specific ones.
-- **Always run typecheck and lint after every change.**
+- **Always run typecheck and lint after every change, inside the devcontainer.**
 - **Build workspace packages before diagnosing cross-package type errors.** This repo consumes generated declarations across workspaces. If typecheck fails in a package that depends on another workspace, rebuild the owning stack first so `dist` declarations are current:
   - `npm run build:client` — rebuild protocol and client declarations.
   - `npm run build:server` — rebuild highlight, relay, protocol, client, server, and CLI when server/CLI types may be stale.
   - Do not patch inferred callback parameters or add local duplicate types just to silence stale declaration errors.
-- **Run `npm run format` before committing.** This repo uses Biome for formatting. Do not manually fix formatting — let the formatter handle it.
+- **Run `npm run format` before committing, inside the devcontainer.** This repo uses oxfmt for formatting. Do not manually fix formatting — let the formatter handle it.
 - **Always use npm scripts for linting and formatting.** Do not run tools directly with `npx eslint`, `npx oxfmt`, `npx oxlint`, or package-local binaries. For targeted checks, pass file paths through the npm script:
   - `npm run lint -- packages/app/src/components/message.tsx`
   - `npm run format:files -- CLAUDE.md packages/app/src/components/message.tsx`

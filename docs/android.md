@@ -158,6 +158,23 @@ Keep the excluded npm packages installed. Normal builds use them, while the F-Dr
 
 The EAS `production-apk` profile uses the large Android resource class. Release builds compile the native ABIs and run Hermes bundling in the same Gradle invocation; the default worker can exhaust its remaining memory and kill Hermes with exit code 137 even when Gradle's own heap is correctly sized.
 
+## Docker arm64 APK smoke builds
+
+For local private-code smoke testing without EAS, use the dedicated builder flow:
+
+```bash
+npm run android:builder:image
+npm run android:apk:arm64
+```
+
+The APK is written to `.local-build/paseo-android-arm64-<version>.apk`.
+The build runs from a temporary `.local-build/android-arm64-build` workspace and
+uses named dependency and Gradle caches, so Expo prebuild output and host-side
+`node_modules` do not enter the checkout.
+
+The generated APK is debug-signed when release credentials are absent. Use it
+for temporary installation and testing, not Play Store upload.
+
 ### F-Droid store metadata
 
 F-Droid reads the store listing from `fastlane/metadata/android/<locale>/` **at the repo root**. This location provides the best compatibility with the F-Droid release process.

@@ -1,0 +1,55 @@
+{
+  "name": "paseo-dev",
+  // The official Node 24 image includes Git; no local Git source build is needed.
+  "build": {
+    "dockerfile": "Dockerfile",
+    // Direct network access by default; inherit a proxy only when set on the host.
+    "args": {
+      "HTTP_PROXY": "${localEnv:http_proxy:}",
+      "HTTPS_PROXY": "${localEnv:https_proxy:}",
+      "NO_PROXY": "${localEnv:no_proxy:}"
+    }
+  },
+  // Let the CLI choose the workspace mount so --mount-git-worktree-common-dir
+  // can preserve relative worktree links. See docs/development.md.
+  // Each checkout gets local dependency volumes, stable across rebuilds.
+  "mounts": [
+    // Share downloaded packages across checkouts on this Docker host.
+    "source=paseo-npm-cache,target=/root/.npm,type=volume",
+    // Keep the install lock and final success record outside npm ci's cleanup.
+    "source=paseo-${devcontainerId}-deps-state,target=/var/lib/paseo-deps,type=volume",
+    "source=paseo-${devcontainerId}-nm-builtin-plugins,target=${containerWorkspaceFolder}/plugins/node_modules,type=volume",
+    "source=paseo-${devcontainerId}-nm-root,target=${containerWorkspaceFolder}/node_modules,type=volume",
+    "source=paseo-${devcontainerId}-nm-expo-two-way-audio,target=${containerWorkspaceFolder}/packages/expo-two-way-audio/node_modules,type=volume",
+    "source=paseo-${devcontainerId}-nm-highlight,target=${containerWorkspaceFolder}/packages/highlight/node_modules,type=volume",
+    "source=paseo-${devcontainerId}-nm-protocol,target=${containerWorkspaceFolder}/packages/protocol/node_modules,type=volume",
+    "source=paseo-${devcontainerId}-nm-client,target=${containerWorkspaceFolder}/packages/client/node_modules,type=volume",
+    "source=paseo-${devcontainerId}-nm-plugin,target=${containerWorkspaceFolder}/packages/plugin/node_modules,type=volume",
+    "source=paseo-${devcontainerId}-nm-server,target=${containerWorkspaceFolder}/packages/server/node_modules,type=volume",
+    "source=paseo-${devcontainerId}-nm-app,target=${containerWorkspaceFolder}/packages/app/node_modules,type=volume",
+    "source=paseo-${devcontainerId}-nm-relay,target=${containerWorkspaceFolder}/packages/relay/node_modules,type=volume",
+    "source=paseo-${devcontainerId}-nm-website,target=${containerWorkspaceFolder}/packages/website/node_modules,type=volume",
+    "source=paseo-${devcontainerId}-nm-desktop,target=${containerWorkspaceFolder}/packages/desktop/node_modules,type=volume",
+    "source=paseo-${devcontainerId}-nm-cli,target=${containerWorkspaceFolder}/packages/cli/node_modules,type=volume"
+  ],
+  // The fuse working tree is owned by root on the host, so run as root inside the
+  // container (uid 0 matches the host) - full access to both the code and the
+  // volumes, and no chown dance. Use Tencent mirrors for APT and npm.
+  "onCreateCommand": "npm config set registry https://mirrors.tencent.com/npm/",
+  // Skip dependency lifecycle downloads; apply the repository's required patches.
+  // Live terminals, Electron and browser tests need their runtime binaries
+  // installed separately. See docs/development.md.
+  "postCreateCommand": "uv run --no-project --python /usr/bin/python3 /usr/local/lib/paseo-devcontainer/ensure-deps.py",
+  "postStartCommand": "uv run --no-project --python /usr/bin/python3 /usr/local/lib/paseo-devcontainer/ensure-deps.py",
+  "remoteUser": "root",
+  "containerEnv": {
+    // Memory headroom for the tsc/tsgo builds across the monorepo.
+    "NODE_OPTIONS": "--max-old-space-size=4096"
+  },
+  "customizations": {
+    "vscode": {
+      // This repo lints/formats with oxlint + oxfmt (not Biome).
+      "extensions": ["oxc.oxc-vscode"]
+    }
+  }
+}
