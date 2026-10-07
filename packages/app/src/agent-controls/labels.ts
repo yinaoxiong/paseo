@@ -37,6 +37,10 @@ export function formatThinkingOptionLabel(option: ControlLabelInput): string {
   const compactId = option.id.replace(/[\s_-]+/g, "").toLowerCase();
   const compactLabel = rawLabel.replace(/[\s_-]+/g, "").toLowerCase();
 
+  if (rawLabel === "Thinking On" || rawLabel === "Thinking Off") {
+    return rawLabel;
+  }
+
   if (compactId === "xhigh" || compactLabel === "xhigh") {
     return i18n.t("agentControls.thinking.extraHigh");
   }

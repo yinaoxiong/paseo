@@ -20,6 +20,12 @@ describe("resolveProviderIconName", () => {
     expect(resolveProviderIconName("gemini")).toEqual({ kind: "catalog", id: "gemini" });
     expect(resolveProviderIconName("gjc")).toEqual({ kind: "catalog", id: "gjc" });
     expect(resolveProviderIconName("traecli")).toEqual({ kind: "catalog", id: "traecli" });
+    expect(resolveProviderIconName("cursor")).toEqual({ kind: "catalog", id: "cursor" });
+  });
+
+  it("aliases Cursor SDK to the Cursor catalog icon", () => {
+    expect(resolveProviderIconName("cursor")).toEqual({ kind: "catalog", id: "cursor" });
+    expect(resolveProviderIconName("cursor-sdk")).toEqual({ kind: "catalog", id: "cursor" });
   });
 
   it("falls back to the bot icon for unknown custom providers", () => {

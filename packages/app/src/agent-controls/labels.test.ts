@@ -29,4 +29,9 @@ describe("formatThinkingOptionLabel", () => {
     expect(formatThinkingOptionLabel({ id: "think-hard", label: "think-hard" })).toBe("Think hard");
     expect(formatThinkingOptionLabel({ id: "xhigh", label: "XHigh" })).toBe("Extra high");
   });
+
+  it("keeps Cursor SDK boolean thinking labels exact", () => {
+    expect(formatThinkingOptionLabel({ id: "true", label: "Thinking On" })).toBe("Thinking On");
+    expect(formatThinkingOptionLabel({ id: "false", label: "Thinking Off" })).toBe("Thinking Off");
+  });
 });

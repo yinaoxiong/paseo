@@ -291,4 +291,79 @@ describe("resolveAgentModelSelection", () => {
     expect(selection.displayModel).toBe("gpt-6.1-sol");
     expect(selection.displayThinking).toBe("Max");
   });
+
+  it("keeps Cursor SDK running-agent thinking unset until explicitly selected", () => {
+    const selection = resolveAgentModelSelection({
+      models: [
+        {
+          id: "sdk:gpt-5.5:context=1m",
+          provider: "cursor-sdk",
+          label: "GPT-5.5 - 1M",
+          defaultThinkingOptionId: "medium",
+          thinkingOptions: [
+            { id: "low", label: "Low" },
+            { id: "medium", label: "Medium", isDefault: true },
+          ],
+        },
+      ],
+      runtimeModelId: "sdk:gpt-5.5:context=1m",
+      configuredModelId: null,
+      runtimeThinkingOptionId: null,
+      explicitThinkingOptionId: null,
+    });
+
+    expect(selection.displayModel).toBe("GPT-5.5 - 1M");
+    expect(selection.selectedThinkingId).toBeNull();
+    expect(selection.displayThinking).toBe("Unknown");
+  });
+
+  it("clears invalid Cursor SDK running-agent thinking instead of falling back to first option", () => {
+    const selection = resolveAgentModelSelection({
+      models: [
+        {
+          id: "sdk:gpt-5.5:context=1m",
+          provider: "cursor-sdk",
+          label: "GPT-5.5 - 1M",
+          thinkingOptions: [
+            { id: "low", label: "Low" },
+            { id: "medium", label: "Medium" },
+          ],
+        },
+      ],
+      runtimeModelId: "sdk:gpt-5.5:context=1m",
+      configuredModelId: null,
+      runtimeThinkingOptionId: null,
+      explicitThinkingOptionId: "missing",
+    });
+
+    expect(selection.selectedThinkingId).toBeNull();
+    expect(selection.displayThinking).toBe("Unknown");
+  });
+
+  it("keeps stale Cursor SDK runtime model ids unresolved instead of falling back", () => {
+    const selection = resolveAgentModelSelection({
+      models: [
+        {
+          id: "sdk:gpt-5.5:context=1m",
+          provider: "cursor-sdk",
+          label: "GPT-5.5 - 1M",
+          thinkingOptions: [
+            { id: "low", label: "Low" },
+            { id: "medium", label: "Medium" },
+          ],
+        },
+      ],
+      runtimeModelId: "sdk:gpt-5.5:context=stale",
+      configuredModelId: null,
+      runtimeThinkingOptionId: null,
+      explicitThinkingOptionId: "medium",
+    });
+
+    expect(selection.selectedModel).toBeNull();
+    expect(selection.activeModelId).toBe("sdk:gpt-5.5:context=stale");
+    expect(selection.displayModel).toBe("sdk:gpt-5.5:context=stale");
+    expect(selection.thinkingOptions).toBeNull();
+    expect(selection.selectedThinkingId).toBeNull();
+    expect(selection.displayThinking).toBe("Unknown");
+  });
 });

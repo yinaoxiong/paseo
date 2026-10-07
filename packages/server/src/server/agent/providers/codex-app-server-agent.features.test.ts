@@ -100,7 +100,7 @@ function createConfig(overrides: Partial<AgentSessionConfig> = {}): AgentSession
 
 function createSessionHarness(
   configOverrides: Partial<AgentSessionConfig> = {},
-  options: { logger?: pino.Logger; models?: unknown[] } = {},
+  options: { logger?: pino.Logger; models?: unknown[]; configuredModel?: string } = {},
 ): {
   session: CodexFeaturesTestSession;
   appServer: FakeCodexAppServer;
@@ -109,6 +109,9 @@ function createSessionHarness(
   const appServer = createFakeCodexAppServer({
     "collaborationMode/list": () => ({ data: TEST_COLLABORATION_MODES }),
     "model/list": () => ({ data: options.models ?? TEST_SPEED_MODELS }),
+    "config/read": () => ({
+      config: options.configuredModel ? { model: options.configuredModel } : {},
+    }),
   });
   const session = new CodexAppServerAgentSession(
     { ...config, provider: CODEX_PROVIDER },
@@ -121,7 +124,7 @@ function createSessionHarness(
 
 async function createConnectedSession(
   configOverrides: Partial<AgentSessionConfig> = {},
-  options: { logger?: pino.Logger; models?: unknown[] } = {},
+  options: { logger?: pino.Logger; models?: unknown[]; configuredModel?: string } = {},
 ): Promise<{
   session: CodexFeaturesTestSession;
   appServer: FakeCodexAppServer;
@@ -133,6 +136,47 @@ async function createConnectedSession(
 }
 
 describe("Codex app-server provider features", () => {
+  test("reconciles restored Fast when the configured default model has different speed tiers", async () => {
+    const { session, appServer } = await createConnectedSession(
+      { model: undefined, featureValues: { fast_mode: true } },
+      {
+        configuredModel: "gpt-6.1-sol",
+        models: [
+          {
+            id: "gpt-6-sol",
+            isDefault: true,
+            defaultReasoningEffort: "medium",
+            serviceTiers: [{ id: "priority", name: "Fast", description: "Fast processing" }],
+          },
+          {
+            id: "gpt-6.1-sol",
+            defaultReasoningEffort: "medium",
+            serviceTiers: [{ id: "ultrafast", name: "Ultrafast", description: "Ultra processing" }],
+          },
+        ],
+      },
+    );
+    try {
+      await session.startTurn("hello");
+      await expect(appServer.waitForTurnStart()).resolves.toMatchObject({
+        model: "gpt-6.1-sol",
+        serviceTier: "default",
+      });
+      expect(session.features).toContainEqual(
+        expect.objectContaining({
+          id: "service_tier",
+          value: "default",
+          options: [
+            { id: "default", label: "Normal", isDefault: true },
+            { id: "ultrafast", label: "Ultrafast" },
+          ],
+        }),
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
   test("GPT-6.1 Sol offers catalog speed tiers and sends Ultrafast", async () => {
     const { session, appServer } = await createConnectedSession(
       { model: "gpt-6.1-sol" },

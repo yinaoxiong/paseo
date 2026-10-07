@@ -55,6 +55,14 @@ const TEST_PI_DEFINITION: AgentProviderDefinition = {
   modes: [],
 };
 
+const TEST_CURSOR_SDK_DEFINITION: AgentProviderDefinition = {
+  id: "cursor-sdk",
+  label: "Cursor SDK",
+  description: "Cursor SDK test provider",
+  defaultModeId: "yolo",
+  modes: [{ id: "yolo", label: "YOLO", icon: "ShieldOff", colorTier: "dangerous" }],
+};
+
 const CODEX_MODELS: AgentModelDefinition[] = [
   {
     provider: "codex",
@@ -71,6 +79,15 @@ const CODEX_MODELS: AgentModelDefinition[] = [
 
 const ALIASED_CODEX_MODELS: AgentModelDefinition[] = [
   { ...CODEX_MODELS[0], aliases: ["gpt-5.3-codex-legacy"] },
+];
+
+const CURSOR_SDK_MODELS: AgentModelDefinition[] = [
+  {
+    provider: "cursor-sdk",
+    id: "sdk:gpt-5.5:context=1m",
+    label: "GPT-5.5 - 1M",
+    isDefault: true,
+  },
 ];
 
 function makeProviderMap(
@@ -1089,6 +1106,26 @@ describe("resolveAgentForm", () => {
       });
 
       expect(next.form.thinkingOptionId).toBe("low");
+    });
+
+    it("keeps Cursor SDK model selection explicit when a profile has no model", () => {
+      const next = resolveAgentForm(makeState(), {
+        type: "APPLY_PROFILE_FROM_USER",
+        provider: "cursor-sdk",
+        modelId: "",
+        modeId: "yolo",
+        thinkingOptionId: "",
+        providerDef: TEST_CURSOR_SDK_DEFINITION,
+        providerModels: CURSOR_SDK_MODELS,
+        providerPrefs: undefined,
+      });
+
+      expect(next.form).toMatchObject({
+        provider: "cursor-sdk",
+        model: "",
+        modeId: "yolo",
+        thinkingOptionId: "",
+      });
     });
   });
 

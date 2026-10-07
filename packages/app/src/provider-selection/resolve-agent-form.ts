@@ -540,7 +540,10 @@ function completeResolution(
 function applyProfile(state: AgentFormReducerState, action: ApplyProfileAction) {
   const preferredModelId = action.modelId || action.providerPrefs?.model || "";
   const normalizedModelId = resolveCanonicalModelId(action.providerModels, preferredModelId);
-  const nextModelId = normalizedModelId || resolveDefaultModelId(action.providerModels);
+  const nextModelId =
+    action.provider === "cursor-sdk" && !preferredModelId
+      ? ""
+      : normalizedModelId || resolveDefaultModelId(action.providerModels);
   const availableModeIds = new Set(action.providerDef?.modes.map((mode) => mode.id) ?? []);
   const preferredModeId = action.modeId || action.providerPrefs?.mode || "";
   const defaultModeId = action.providerDef?.defaultModeId ?? "";

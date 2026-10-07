@@ -1,4 +1,5 @@
-import type { AgentFeature } from "@getpaseo/protocol/agent-types";
+import type { AgentFeature, AgentProvider } from "@getpaseo/protocol/agent-types";
+import type { FormPreferences } from "@/create-agent-preferences/preferences";
 
 export function pruneFeatureValues(
   featureValues: Record<string, unknown>,
@@ -17,6 +18,31 @@ export function pruneFeatureValues(
   }
 
   return changed ? next : featureValues;
+}
+
+export function replaceProviderFeatureValues(args: {
+  preferences: FormPreferences;
+  provider: AgentProvider;
+  featureValues: Record<string, unknown>;
+}): FormPreferences {
+  const { preferences, provider, featureValues } = args;
+  const existingProviderPreferences = preferences.providerPreferences ?? {};
+  const existing = existingProviderPreferences[provider] ?? {};
+  const nextProviderPreferences = { ...existing };
+
+  if (Object.keys(featureValues).length > 0) {
+    nextProviderPreferences.featureValues = featureValues;
+  } else {
+    delete nextProviderPreferences.featureValues;
+  }
+
+  return {
+    ...preferences,
+    providerPreferences: {
+      ...existingProviderPreferences,
+      [provider]: nextProviderPreferences,
+    },
+  };
 }
 
 export function applyFeatureValues(
