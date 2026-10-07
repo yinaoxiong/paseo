@@ -1,0 +1,15 @@
+/* Display math is a block sibling of RN Views, which do not set CSS color.
+   Force KaTeX glyphs and fraction rules to follow the wrapper color. */
+.paseo-math-formula,
+.paseo-math-formula .katex,
+.paseo-math-formula .katex-html {
+  color: inherit;
+}
+
+.paseo-math-formula .frac-line,
+.paseo-math-formula .hline,
+.paseo-math-formula .overline,
+.paseo-math-formula .underline,
+.paseo-math-formula .sqrt-line {
+  border-color: currentColor;
+}
