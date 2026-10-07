@@ -13,6 +13,8 @@ vi.mock("./checkout-git-utils.js", () => ({
 import type pino from "pino";
 import { CheckoutDiffManager } from "./checkout-diff-manager.js";
 import type { WorkspaceGitRuntimeSnapshot, WorkspaceGitService } from "./workspace-git-service.js";
+import { createManualGitActivityPolicy } from "./test-utils/workspace-git-service-stub.js";
+import type { GitActivityPolicyService } from "./git-activity/policy.js";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -97,6 +99,64 @@ function createPendingManager() {
   return { manager, watches };
 }
 
+function createManager(options?: {
+  repoRoot?: string | null;
+  getCheckoutDiffImplementation?: ReturnType<typeof vi.fn>;
+  gitActivity?: GitActivityPolicyService;
+}) {
+  const unsubscribe = vi.fn();
+  const workspaceUnsubscribe = vi.fn();
+  let onChange: (() => void) | null = null;
+  let onWorkspaceSnapshot: ((snapshot: WorkspaceGitRuntimeSnapshot) => void) | null = null;
+  const mockRequestWorkingTreeWatch = vi.fn(async (_cwd: string, listener: () => void) => {
+    onChange = listener;
+    return {
+      repoRoot: options?.repoRoot === undefined ? "/tmp/repo" : options.repoRoot,
+      unsubscribe,
+    };
+  });
+
+  const workspaceGitService = {
+    subscribe: vi.fn(),
+    peekSnapshot: vi.fn(),
+    registerWorkspace: vi.fn(
+      (_params: { cwd: string }, listener: (snapshot: WorkspaceGitRuntimeSnapshot) => void) => {
+        onWorkspaceSnapshot = listener;
+        return { unsubscribe: workspaceUnsubscribe };
+      },
+    ),
+    getSnapshot: vi.fn(async () => createWorkspaceSnapshot()),
+    getCheckoutDiff:
+      options?.getCheckoutDiffImplementation ?? vi.fn(async () => ({ diff: "", structured: [] })),
+    refresh: vi.fn(),
+    scheduleRefreshForCwd: vi.fn(),
+    requestWorkingTreeWatch: mockRequestWorkingTreeWatch,
+    dispose: vi.fn(),
+  };
+
+  const logger = {
+    child: () => logger,
+    warn: vi.fn(),
+  };
+
+  const manager = new CheckoutDiffManager({
+    logger: logger as unknown as pino.Logger,
+    paseoHome: "/tmp/paseo-test",
+    workspaceGitService: workspaceGitService as unknown as WorkspaceGitService,
+    ...(options?.gitActivity ? { gitActivity: options.gitActivity } : {}),
+  });
+
+  return {
+    manager,
+    workspaceGitService,
+    mockRequestWorkingTreeWatch,
+    unsubscribe,
+    getOnChange: () => onChange,
+    getOnWorkspaceSnapshot: () => onWorkspaceSnapshot,
+    workspaceUnsubscribe,
+  };
+}
+
 describe("CheckoutDiffManager", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -106,62 +166,6 @@ describe("CheckoutDiffManager", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
-
-  function createManager(options?: {
-    repoRoot?: string | null;
-    getCheckoutDiffImplementation?: ReturnType<typeof vi.fn>;
-  }) {
-    const unsubscribe = vi.fn();
-    const workspaceUnsubscribe = vi.fn();
-    let onChange: (() => void) | null = null;
-    let onWorkspaceSnapshot: ((snapshot: WorkspaceGitRuntimeSnapshot) => void) | null = null;
-    const mockRequestWorkingTreeWatch = vi.fn(async (_cwd: string, listener: () => void) => {
-      onChange = listener;
-      return {
-        repoRoot: options?.repoRoot === undefined ? "/tmp/repo" : options.repoRoot,
-        unsubscribe,
-      };
-    });
-
-    const workspaceGitService = {
-      subscribe: vi.fn(),
-      peekSnapshot: vi.fn(),
-      registerWorkspace: vi.fn(
-        (_params: { cwd: string }, listener: (snapshot: WorkspaceGitRuntimeSnapshot) => void) => {
-          onWorkspaceSnapshot = listener;
-          return { unsubscribe: workspaceUnsubscribe };
-        },
-      ),
-      getSnapshot: vi.fn(async () => createWorkspaceSnapshot()),
-      getCheckoutDiff:
-        options?.getCheckoutDiffImplementation ?? vi.fn(async () => ({ diff: "", structured: [] })),
-      refresh: vi.fn(),
-      scheduleRefreshForCwd: vi.fn(),
-      requestWorkingTreeWatch: mockRequestWorkingTreeWatch,
-      dispose: vi.fn(),
-    };
-
-    const logger = {
-      child: () => logger,
-      warn: vi.fn(),
-    };
-
-    const manager = new CheckoutDiffManager({
-      logger: logger as unknown as pino.Logger,
-      paseoHome: "/tmp/paseo-test",
-      workspaceGitService: workspaceGitService as unknown as WorkspaceGitService,
-    });
-
-    return {
-      manager,
-      workspaceGitService,
-      mockRequestWorkingTreeWatch,
-      unsubscribe,
-      getOnChange: () => onChange,
-      getOnWorkspaceSnapshot: () => onWorkspaceSnapshot,
-      workspaceUnsubscribe,
-    };
-  }
 
   test("subscribe requests a working tree watch with the correct cwd", async () => {
     const { manager, mockRequestWorkingTreeWatch } = createManager();
@@ -481,5 +485,167 @@ describe("CheckoutDiffManager", () => {
       expect.objectContaining({ mode: "uncommitted", includeStructured: true }),
       undefined,
     );
+  });
+});
+
+describe("manual git activity", () => {
+  test("explicit diff reads bypass the cache without arming an observer", async () => {
+    const { manager, workspaceGitService, mockRequestWorkingTreeWatch } = createManager({
+      gitActivity: createManualGitActivityPolicy(),
+    });
+    await manager.read({ cwd: "/tmp/repo", compare: { mode: "uncommitted" } });
+    expect(workspaceGitService.getCheckoutDiff).toHaveBeenCalledWith(
+      "/tmp/repo",
+      expect.objectContaining({ mode: "uncommitted", includeStructured: true }),
+      { force: true, reason: "manual-diff-read" },
+    );
+    expect(mockRequestWorkingTreeWatch).not.toHaveBeenCalled();
+    expect(workspaceGitService.registerWorkspace).not.toHaveBeenCalled();
+    expect(manager.getMetrics().checkoutDiffTargetCount).toBe(0);
+  });
+
+  /**
+   * The frozen acceptance bar: an old client's automatic subscribe (which it
+   * re-sends on every reconnect) must perform ZERO Git reads. "No observer"
+   * alone is not enough — one computed diff per reconnect is still automatic
+   * Git work on a stalled mount.
+   */
+  test("repeated legacy subscribes perform zero git reads", async () => {
+    const { manager, workspaceGitService, mockRequestWorkingTreeWatch } = createManager({
+      gitActivity: createManualGitActivityPolicy(),
+    });
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const subscription = await manager.subscribe(
+        { cwd: "/tmp/repo", compare: { mode: "uncommitted" } },
+        () => {},
+      );
+      // The error shape is parseable and marked paused, never "no changes".
+      expect(subscription.initial.error).toMatchObject({ code: "NOT_ALLOWED" });
+      expect(subscription.initial.files).toEqual([]);
+      expect(() => subscription.unsubscribe()).not.toThrow();
+    }
+
+    expect(workspaceGitService.getCheckoutDiff).not.toHaveBeenCalled();
+    expect(workspaceGitService.getSnapshot).not.toHaveBeenCalled();
+    expect(workspaceGitService.peekSnapshot).not.toHaveBeenCalled();
+    expect(workspaceGitService.registerWorkspace).not.toHaveBeenCalled();
+    expect(mockRequestWorkingTreeWatch).not.toHaveBeenCalled();
+    expect(manager.getMetrics().checkoutDiffTargetCount).toBe(0);
+  });
+
+  test("a reconnect after switching to manual serves the cached payload and reads nothing", async () => {
+    const admitted = { value: true };
+    const policy: GitActivityPolicyService = {
+      isAutomatic: () => admitted.value,
+      peek: () => ({
+        configuredPolicy: "auto",
+        effectiveMode: admitted.value ? "automatic" : "manual",
+        reason: "storage_local",
+        lastCheckedAt: null,
+      }),
+      resolve: async () => ({
+        configuredPolicy: "auto",
+        effectiveMode: admitted.value ? "automatic" : "manual",
+        reason: "storage_local",
+        lastCheckedAt: null,
+      }),
+      refreshPolicy: () => {},
+      invalidate: () => {},
+      invalidateMountTable: () => {},
+      dispose: () => {},
+    };
+    const { manager, workspaceGitService } = createManager({ gitActivity: policy });
+
+    // While admitted the client gets a real computed diff, which is cached.
+    const live = await manager.subscribe(
+      { cwd: "/tmp/repo", compare: { mode: "uncommitted" } },
+      () => {},
+    );
+    const readsAfterFirst = workspaceGitService.getCheckoutDiff.mock.calls.length;
+    expect(readsAfterFirst).toBeGreaterThan(0);
+    expect(live.initial.error).toBeNull();
+
+    // The policy flips to manual while the pane stays open, and the client
+    // reconnects with a fresh subscription: the cached payload is served
+    // as-is. A recomputation here would be automatic Git work.
+    admitted.value = false;
+    const reconnected = await manager.subscribe(
+      { cwd: "/tmp/repo", compare: { mode: "uncommitted" } },
+      () => {},
+    );
+
+    expect(workspaceGitService.getCheckoutDiff).toHaveBeenCalledTimes(readsAfterFirst);
+    expect(reconnected.initial.error).toBeNull();
+    expect(reconnected.initial.cwd).toBe("/tmp/repo");
+  });
+
+  test("a legacy subscribe for a different compare never gets an unrelated cached payload", async () => {
+    const admitted = { value: true };
+    const policy: GitActivityPolicyService = {
+      isAutomatic: () => admitted.value,
+      peek: () => ({
+        configuredPolicy: "auto",
+        effectiveMode: admitted.value ? "automatic" : "manual",
+        reason: "storage_local",
+        lastCheckedAt: null,
+      }),
+      resolve: async () => ({
+        configuredPolicy: "auto",
+        effectiveMode: admitted.value ? "automatic" : "manual",
+        reason: "storage_local",
+        lastCheckedAt: null,
+      }),
+      refreshPolicy: () => {},
+      invalidate: () => {},
+      invalidateMountTable: () => {},
+      dispose: () => {},
+    };
+
+    // Each compare gets its own real diff, so a cwd-only cache lookup would be
+    // observably wrong rather than merely theoretically wrong.
+    const diffsByCompare = new Map<string, Array<{ path: string }>>([
+      ["uncommitted", [{ path: "src/uncommitted.ts" }]],
+      ["base:main", [{ path: "src/committed-on-branch.ts" }]],
+    ]);
+    const getCheckoutDiffImplementation = vi.fn(
+      async (_cwd: string, compare: { mode: string; baseRef?: string }) => {
+        const key = compare.mode === "base" ? `base:${compare.baseRef ?? ""}` : "uncommitted";
+        return { diff: "", structured: diffsByCompare.get(key) ?? [] };
+      },
+    );
+    const { manager, workspaceGitService } = createManager({
+      gitActivity: policy,
+      getCheckoutDiffImplementation,
+    });
+
+    // While admitted, the uncommitted diff is computed and cached.
+    const uncommitted = await manager.subscribe(
+      { cwd: "/tmp/repo", compare: { mode: "uncommitted" } },
+      () => {},
+    );
+    expect(uncommitted.initial.files.map((file) => file.path)).toEqual(["src/uncommitted.ts"]);
+
+    // Manual now. A legacy subscribe asking for a *different* compare must not
+    // be served the uncommitted payload: that would render one comparison's
+    // files as another's.
+    admitted.value = false;
+    const baseSubscribe = await manager.subscribe(
+      { cwd: "/tmp/repo", compare: { mode: "base", baseRef: "main" } },
+      () => {},
+    );
+
+    expect(baseSubscribe.initial.files).toEqual([]);
+    expect(baseSubscribe.initial.error).toMatchObject({ code: "NOT_ALLOWED" });
+    expect(workspaceGitService.getCheckoutDiff).toHaveBeenCalledTimes(1);
+
+    // The exactly matching compare still gets its own cached payload with no
+    // recomputation.
+    const sameCompare = await manager.subscribe(
+      { cwd: "/tmp/repo", compare: { mode: "uncommitted" } },
+      () => {},
+    );
+    expect(sameCompare.initial.files.map((file) => file.path)).toEqual(["src/uncommitted.ts"]);
+    expect(workspaceGitService.getCheckoutDiff).toHaveBeenCalledTimes(1);
   });
 });

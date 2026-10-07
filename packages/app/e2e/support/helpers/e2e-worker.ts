@@ -8,6 +8,7 @@ import { startIsolatedHostDaemon } from "./isolated-host-daemon";
 
 export interface E2EWorker {
   close(): Promise<void>;
+  restart(): Promise<void>;
 }
 
 export interface E2EWorkerOptions {
@@ -211,6 +212,7 @@ export async function startE2EWorker(
       `[e2e] Worker ${workerIndex} daemon started on port ${daemon.port}, home: ${daemon.paseoHome}`,
     );
     return {
+      restart: () => daemon.restart(),
       close: async () => {
         await daemon.close();
         await rm(fakeEditorBin, { recursive: true, force: true });

@@ -1,9 +1,26 @@
+import * as nodeFs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type pino from "pino";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { CheckoutSnapshotFacts, CheckoutStatusGit } from "../utils/checkout-git.js";
 import { CheckoutDiffManager } from "./checkout-diff-manager.js";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof nodeFs>();
+  return {
+    ...actual,
+    realpathSync: vi.fn((target: string) => actual.realpathSync(target)),
+  };
+});
+
+/**
+ * Any synchronous realpath during a watcher callback is the bug this suite
+ * guards: it blocks the daemon's main thread on workspace I/O. `path.ts` calls
+ * `realpathSync` (and `realpathSync.native`), so the mocked module lets the
+ * suite assert zero calls during event delivery.
+ */
+const realpathSyncSpy = vi.mocked(nodeFs.realpathSync);
 import type { FileObserver } from "./file-observer/index.js";
 import { WorkspaceGitServiceImpl } from "./workspace-git-service.js";
 
@@ -243,6 +260,7 @@ function createService(
         filterEvents: (events) => events,
         verify: vi.fn(async () => {}),
       })),
+      resolveObservationRootAliases: async (root: string) => [root],
       ...overrides,
     } as never,
   });
@@ -261,6 +279,7 @@ describe("WorkspaceGitService checkout observation", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    realpathSyncSpy.mockClear();
   });
 
   test("waits for the initial watcher inventory before building a cold diff", async () => {
@@ -419,6 +438,44 @@ describe("WorkspaceGitService checkout observation", () => {
     await vi.waitFor(() => {
       expect(unsubscribeWatcher).toHaveBeenCalledTimes(1);
       expect(service.getMetrics().workingTreeWatchTargetCount).toBe(0);
+    });
+
+    service.dispose();
+  });
+
+  test("losing every listener during alias resolution creates no repository observation", async () => {
+    const watcher = createWatcherHarness();
+    // Only the repository root read stalls: the working tree must reach its
+    // subscribe so the test can prove the repo half never starts.
+    let releaseRepoAliases: ((aliases: readonly string[]) => void) | null = null;
+    const resolveObservationRootAliases = vi.fn((root: string) =>
+      root === GIT_DIR
+        ? new Promise<readonly string[]>((resolve) => {
+            releaseRepoAliases = () => resolve([root]);
+          })
+        : Promise.resolve([root]),
+    );
+    const service = createService(watcher, { resolveObservationRootAliases });
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+
+    await vi.waitFor(() => {
+      expect(getWatcherSubscribeCallCount(watcher, REPO_CWD)).toBe(1);
+      expect(releaseRepoAliases).not.toBeNull();
+    });
+    // Drop the only listener while the repository alias read is still pending.
+    subscription.unsubscribe();
+    releaseRepoAliases?.([GIT_DIR]);
+    // Give every continuation the awaited subscribe would need to run.
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushPromises();
+
+    // No repository metadata watcher and no fetch timer for a dead workspace.
+    expect(getWatcherSubscribeCallCount(watcher, GIT_DIR)).toBe(0);
+    expect(service.getMetrics()).toMatchObject({
+      repositoryTargetCount: 0,
+      repositoryWorkspaceLinkCount: 0,
+      fetchInFlightCount: 0,
     });
 
     service.dispose();
@@ -2788,6 +2845,168 @@ describe("WorkspaceGitService checkout observation", () => {
     diffSubscription.unsubscribe();
     subscription.unsubscribe();
     diffManager.dispose();
+    service.dispose();
+  });
+
+  test("a symlinked watch root routes events delivered through its real path", async () => {
+    const watcher = createWatcherHarness();
+    const realRepoRoot = "/mnt/real/paseo-observation-repo";
+    const getCheckoutStatus = vi.fn(async (cwd: string) => createCheckoutStatus(cwd));
+    const runGitCommand = vi.fn(async (args: string[]) => ({
+      stdout: args[0] === "rev-parse" ? `${REPO_CWD}\n` : "",
+      stderr: "",
+      truncated: false,
+      exitCode: 0,
+      signal: null,
+    }));
+    const service = createService(watcher, {
+      getCheckoutStatus,
+      runGitCommand,
+      resolveObservationRootAliases: async (root: string) =>
+        root === REPO_CWD ? [REPO_CWD, realRepoRoot] : [root],
+    });
+
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    await vi.waitFor(() => {
+      expect(service.peekSnapshot(REPO_CWD)).not.toBeNull();
+      expect(service.getMetrics().workspaceObservationSetupInFlightCount).toBe(0);
+    });
+    const workingTreeWatcher = getWatcherRecordsForDirectory(watcher, REPO_CWD)[0];
+    expect(workingTreeWatcher).toBeDefined();
+    getCheckoutStatus.mockClear();
+
+    // The watcher reports the real path while the workspace cwd uses the symlink.
+    workingTreeWatcher?.callback(null, [
+      { path: path.join(realRepoRoot, "src", "tracked.txt"), type: "update" },
+    ]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => {
+      expect(getCalledCwds(getCheckoutStatus)).toEqual([REPO_CWD]);
+    });
+
+    subscription.unsubscribe();
+    service.dispose();
+  });
+
+  test("private git dir events route through the repository root's aliases", async () => {
+    const watcher = createWatcherHarness();
+    const realGitDir = "/mnt/real/paseo-observation-repo/.git";
+    const getCheckoutSnapshotFacts = vi.fn(async (cwd: string) => createLinkedCheckoutFacts(cwd));
+    const getCheckoutStatus = vi.fn(async (cwd: string) =>
+      createCheckoutStatus(cwd, { currentBranch: path.basename(cwd) }),
+    );
+    const service = createService(watcher, {
+      getCheckoutSnapshotFacts,
+      getCheckoutStatus,
+      resolveObservationRootAliases: async (root: string) =>
+        root === GIT_DIR ? [GIT_DIR, realGitDir] : [root],
+    });
+    const first = service.registerWorkspace({ cwd: WORKTREE_A }, vi.fn());
+    const second = service.registerWorkspace({ cwd: WORKTREE_B }, vi.fn());
+
+    await vi.waitFor(() => {
+      expect(service.getMetrics()).toMatchObject({
+        repositoryTargetCount: 1,
+        repositoryWorkspaceLinkCount: 2,
+        workspaceObservationSetupInFlightCount: 0,
+      });
+    });
+    const repoWatcher = watcher.records.find((record) => record.directory === GIT_DIR);
+    expect(repoWatcher).toBeDefined();
+    getCheckoutStatus.mockClear();
+
+    // The private git dir is a symlink target too: its events must still resolve
+    // to the owning worktree even though the event arrives under the real path.
+    repoWatcher?.callback(null, [
+      {
+        path: path.join(realGitDir, "worktrees", path.basename(WORKTREE_A), "index"),
+        type: "update",
+      },
+    ]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => {
+      expect(getCalledCwds(getCheckoutStatus)).toEqual([WORKTREE_A]);
+    });
+
+    first.unsubscribe();
+    second.unsubscribe();
+    service.dispose();
+  });
+
+  test("a deleted packed-refs temporary routes with no synchronous realpath", async () => {
+    const watcher = createWatcherHarness();
+    const getCheckoutStatus = vi.fn(async (cwd: string) => createCheckoutStatus(cwd));
+    const service = createService(watcher, { getCheckoutStatus });
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+
+    await vi.waitFor(() => {
+      expect(service.getMetrics()).toMatchObject({
+        repositoryTargetCount: 1,
+        workspaceObservationSetupInFlightCount: 0,
+      });
+    });
+    const repoWatcher = watcher.records.find((record) => record.directory === GIT_DIR);
+    expect(repoWatcher).toBeDefined();
+    getCheckoutStatus.mockClear();
+    realpathSyncSpy.mockClear();
+
+    // The path that wedged the daemon: a temporary fetch artifact that no longer
+    // exists by the time the event is delivered.
+    repoWatcher?.callback(null, [{ path: path.join(GIT_DIR, "packed-refs.new"), type: "delete" }]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushPromises();
+    expect(realpathSyncSpy).not.toHaveBeenCalled();
+    expect(getCalledCwds(getCheckoutStatus)).toEqual([]);
+
+    // Observation survives the temporary: a real ref event still refreshes.
+    repoWatcher?.callback(null, [{ path: path.join(GIT_DIR, "packed-refs"), type: "update" }]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => {
+      expect(getCalledCwds(getCheckoutStatus)).toEqual([REPO_CWD]);
+    });
+    expect(realpathSyncSpy).not.toHaveBeenCalled();
+
+    subscription.unsubscribe();
+    service.dispose();
+  });
+
+  test("a stalled alias resolver never blocks unrelated event loop work", async () => {
+    // Only the first wave of root reads stalls, so the test can prove the daemon
+    // keeps running while those reads hang and then finish setup deterministically.
+    let stalled = true;
+    const pendingAliases: Array<(aliases: readonly string[]) => void> = [];
+    const resolveObservationRootAliases = vi.fn(() =>
+      stalled
+        ? new Promise<readonly string[]>((resolve) => {
+            pendingAliases.push(resolve);
+          })
+        : Promise.resolve([REPO_CWD]),
+    );
+    const watcher = createWatcherHarness();
+    const service = createService(watcher, { resolveObservationRootAliases });
+
+    const setup = service.requestWorkingTreeWatch(REPO_CWD, vi.fn());
+
+    // The daemon keeps processing timers while the alias read hangs, and no
+    // watcher is registered until the aliases are known.
+    let loopProgressed = false;
+    setTimeout(() => {
+      loopProgressed = true;
+    }, 0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loopProgressed).toBe(true);
+    expect(watcher.subscribe).not.toHaveBeenCalled();
+    expect(pendingAliases.length).toBeGreaterThan(0);
+
+    stalled = false;
+    while (pendingAliases.length > 0) {
+      pendingAliases.pop()?.([REPO_CWD]);
+    }
+    const subscription = await setup;
+    expect(watcher.subscribe).toHaveBeenCalledTimes(1);
+    expect(getWatcherRecordsForDirectory(watcher, REPO_CWD)[0]).toBeDefined();
+
+    subscription.unsubscribe();
     service.dispose();
   });
 });

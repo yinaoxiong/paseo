@@ -25,6 +25,8 @@ describe("daemon Git process config", () => {
     expect(loadConfig(home, { env: {} }).git).toEqual({
       maxProcessesPerSecond: 64,
       maxProcessConcurrency: 8,
+      // The host-global activity policy is always resolved, defaulting to auto.
+      policy: "auto",
     });
   });
 
@@ -41,6 +43,7 @@ describe("daemon Git process config", () => {
     expect(loadConfig(home, { env: {} }).git).toEqual({
       maxProcessesPerSecond: 5,
       maxProcessConcurrency: 4,
+      policy: "auto",
     });
   });
 
@@ -64,6 +67,7 @@ describe("daemon Git process config", () => {
     ).toEqual({
       maxProcessesPerSecond: 12,
       maxProcessConcurrency: 6,
+      policy: "auto",
     });
   });
 

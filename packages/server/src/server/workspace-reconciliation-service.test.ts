@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { ProjectCheckoutLitePayload } from "@getpaseo/protocol/messages";
+import type { GitActivityPolicy, ProjectCheckoutLitePayload } from "@getpaseo/protocol/messages";
 import type pino from "pino";
 import { afterEach, describe, expect, test } from "vitest";
 import {
@@ -16,10 +16,19 @@ import type {
   WorkspaceRegistry,
 } from "./workspace-registry.js";
 import {
+  type ProjectRootWatch,
   type ReconciliationChange,
+  type ReconciliationClock,
+  type ReconciliationGitActivity,
+  type ReconciliationTimer,
   WorkspaceReconciliationService,
 } from "./workspace-reconciliation-service.js";
 import { deriveProjectKey } from "./project-key.js";
+import { createGitActivityPolicyService } from "./git-activity/policy.js";
+import type {
+  FilesystemClassifier,
+  WorkspaceFilesystemVerdict,
+} from "./git-activity/filesystem.js";
 
 function canonicalLocalProjectKey(rootPath: string): string {
   return deriveProjectKey({
@@ -191,6 +200,202 @@ function deferred(): { promise: Promise<void>; resolve(): void } {
     resolve = accept;
   });
   return { promise, resolve };
+}
+
+interface TestTimer extends ReconciliationTimer {
+  callback: () => void | Promise<void>;
+  dueAt: number;
+  intervalMs: number | null;
+}
+
+/** Drives the rescan interval without waiting on wall-clock time. */
+class TestClock implements ReconciliationClock {
+  private now = 0;
+  private readonly timers = new Set<TestTimer>();
+
+  setTimeout(callback: () => void | Promise<void>, delayMs: number): TestTimer {
+    return this.add(callback, delayMs, null);
+  }
+
+  clearTimeout(timer: ReconciliationTimer): void {
+    this.timers.delete(timer as TestTimer);
+  }
+
+  setInterval(callback: () => void | Promise<void>, delayMs: number): TestTimer {
+    return this.add(callback, delayMs, delayMs);
+  }
+
+  clearInterval(timer: ReconciliationTimer): void {
+    this.timers.delete(timer as TestTimer);
+  }
+
+  /** Fires every timer due within `elapsedMs`, in due order, awaiting each. */
+  async advanceBy(elapsedMs: number): Promise<void> {
+    const target = this.now + elapsedMs;
+    for (;;) {
+      const next = [...this.timers]
+        .filter((timer) => timer.dueAt <= target)
+        .sort((left, right) => left.dueAt - right.dueAt)[0];
+      if (!next) break;
+      this.now = next.dueAt;
+      if (next.intervalMs === null) this.timers.delete(next);
+      else next.dueAt += next.intervalMs;
+      await next.callback();
+    }
+    this.now = target;
+  }
+
+  private add(
+    callback: () => void | Promise<void>,
+    delayMs: number,
+    intervalMs: number | null,
+  ): TestTimer {
+    const timer = { callback, dueAt: this.now + delayMs, intervalMs, unref: () => undefined };
+    this.timers.add(timer);
+    return timer;
+  }
+}
+
+/**
+ * The real policy service over a scripted classifier, so the gate is exercised
+ * against actual `unknown`/`manual`/`automatic` transitions and the real 60s
+ * verdict TTL rather than a stub that hardcodes a boolean.
+ */
+function createTestGitActivity(options: {
+  policy: GitActivityPolicy;
+  classify?: (cwd: string) => Promise<WorkspaceFilesystemVerdict>;
+  cacheTtlMs?: number;
+}): {
+  gitActivity: ReconciliationGitActivity;
+  ensureCalls: () => string[];
+  setPolicy: (next: GitActivityPolicy) => void;
+  advanceClock: (elapsedMs: number) => void;
+  /** Settles a verdict without counting as a request from the service. */
+  settle: (cwd: string) => Promise<boolean>;
+} {
+  let clock = 0;
+  let policy: GitActivityPolicy = options.policy;
+  const ensureCalls: string[] = [];
+  const classifier: FilesystemClassifier = {
+    classify: options.classify ?? (async () => localVerdict()),
+    invalidate: () => undefined,
+    invalidateMountTable: () => undefined,
+    dispose: () => undefined,
+  } as unknown as FilesystemClassifier;
+  const service = createGitActivityPolicyService({
+    classifier,
+    logger: createTestLogger(),
+    getPolicy: () => policy,
+    now: () => clock,
+    ...(options.cacheTtlMs === undefined ? {} : { cacheTtlMs: options.cacheTtlMs }),
+  });
+  return {
+    gitActivity: {
+      isAutomatic: (cwd) => service.isAutomatic(cwd),
+      peek: (cwd) => service.peek(cwd),
+      ensureClassification: async (cwd) => {
+        ensureCalls.push(cwd);
+        return service.ensureClassification(cwd);
+      },
+    },
+    ensureCalls: () => ensureCalls,
+    setPolicy(next: GitActivityPolicy) {
+      policy = next;
+      service.refreshPolicy();
+    },
+    advanceClock(elapsedMs: number) {
+      clock += elapsedMs;
+    },
+    async settle(cwd: string) {
+      const result = await service.ensureClassification(cwd);
+      return result.automatic;
+    },
+  };
+}
+
+type SeededProjectFields = Partial<Pick<PersistedProjectRecord, "kind" | "projectKey">>;
+
+function seedProject(
+  projects: Map<string, PersistedProjectRecord>,
+  rootPath: string,
+  fields: SeededProjectFields = {},
+): PersistedProjectRecord {
+  const project = createPersistedProjectRecord({
+    projectId: "p1",
+    rootPath,
+    kind: fields.kind ?? "git",
+    displayName: path.basename(rootPath),
+    projectKey: fields.projectKey ?? null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  });
+  projects.set(project.projectId, project);
+  return project;
+}
+
+type SeededWorkspaceFields = Partial<
+  Pick<PersistedWorkspaceRecord, "kind" | "worktreeRoot" | "mainRepoRoot" | "isPaseoOwnedWorktree">
+>;
+
+function seedWorkspace(
+  workspaces: Map<string, PersistedWorkspaceRecord>,
+  workspaceId: string,
+  projectId: string,
+  cwd: string,
+  fields: SeededWorkspaceFields = {},
+): PersistedWorkspaceRecord {
+  const workspace = createPersistedWorkspaceRecord({
+    workspaceId,
+    projectId,
+    cwd,
+    kind: fields.kind ?? "local_checkout",
+    displayName: path.basename(cwd),
+    worktreeRoot: fields.worktreeRoot ?? null,
+    mainRepoRoot: fields.mainRepoRoot ?? null,
+    isPaseoOwnedWorktree: fields.isPaseoOwnedWorktree ?? false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  });
+  workspaces.set(workspace.workspaceId, workspace);
+  return workspace;
+}
+
+function localVerdict(
+  overrides: Partial<WorkspaceFilesystemVerdict> = {},
+): WorkspaceFilesystemVerdict {
+  return {
+    class: "local",
+    reason: "verified_local_mounts",
+    mountFsType: "ext4",
+    checkedAt: 0,
+    ...overrides,
+  };
+}
+
+/**
+ * Lets the policy service's own classification chain settle. The service never
+ * awaits the probe it kicks off, so a test that needs the landed verdict has to
+ * give the microtask queue room to drain.
+ */
+async function flushMicrotasks(rounds = 20): Promise<void> {
+  for (let index = 0; index < rounds; index += 1) {
+    await Promise.resolve();
+  }
+}
+
+/** A root watcher that never fires; reconciliation is driven by the clock. */
+function inertRootWatch(): ProjectRootWatch {
+  return () => ({ close: () => undefined });
+}
+
+function createErrno(code: string, message: string): NodeJS.ErrnoException {
+  const error = new Error(message) as NodeJS.ErrnoException;
+  error.code = code;
+  return error;
+}
+
+function presentDirectory(): { isDirectory(): boolean } {
+  return { isDirectory: () => true };
 }
 
 class TestCheckouts {
@@ -365,6 +570,271 @@ describe("WorkspaceReconciliationService", () => {
       },
     ]);
     expect(workspaces.get("w1")?.archivedAt).toEqual(expect.any(String));
+  });
+
+  test("full reconciliation archives missing directories but keeps unreadable ones active", async () => {
+    const projectRoot = "/tmp/reconcile-unreadable-root";
+    const unreadableWorkspace = "/tmp/reconcile-unreadable-workspace";
+    const missingWorkspace = "/tmp/reconcile-missing-workspace";
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    const projectKey = deriveProjectKey({
+      rootPath: projectRoot,
+      remoteUrl: null,
+      worktreeRoot: null,
+      mainRepoRoot: null,
+    });
+
+    projects.set(
+      "p1",
+      createPersistedProjectRecord({
+        projectId: "p1",
+        rootPath: projectRoot,
+        kind: "non_git",
+        displayName: "unreadable",
+        projectKey,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+    workspaces.set(
+      "unreadable",
+      createPersistedWorkspaceRecord({
+        workspaceId: "unreadable",
+        projectId: "p1",
+        cwd: unreadableWorkspace,
+        kind: "directory",
+        displayName: "unreadable-workspace",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+    workspaces.set(
+      "missing",
+      createPersistedWorkspaceRecord({
+        workspaceId: "missing",
+        projectId: "p1",
+        cwd: missingWorkspace,
+        kind: "directory",
+        displayName: "missing-workspace",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      statDirectory: async (targetPath) => {
+        if (targetPath === unreadableWorkspace) {
+          throw createErrno("EIO", "Input/output error");
+        }
+        if (targetPath === missingWorkspace) {
+          throw createErrno("ENOENT", "No such file or directory");
+        }
+        return presentDirectory();
+      },
+    });
+
+    const metadataResult = await service.reconcileGitMetadata();
+    expect(metadataResult.changesApplied).toEqual([]);
+    expect(workspaces.get("unreadable")?.archivedAt).toBeNull();
+    expect(workspaces.get("missing")?.archivedAt).toBeNull();
+
+    const fullResult = await service.runOnce();
+    expect(fullResult.changesApplied).toEqual([
+      {
+        kind: "workspace_archived",
+        workspaceId: "missing",
+        directory: missingWorkspace,
+        reason: "directory_missing",
+      },
+    ]);
+    expect(workspaces.get("unreadable")?.archivedAt).toBeNull();
+    expect(workspaces.get("missing")?.archivedAt).toEqual(expect.any(String));
+  });
+
+  test("treats a timed-out directory inspection as unreadable instead of missing", async () => {
+    const projectRoot = "/tmp/reconcile-timeout-root";
+    const hungWorkspace = "/tmp/reconcile-timeout-workspace";
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    const projectKey = deriveProjectKey({
+      rootPath: projectRoot,
+      remoteUrl: null,
+      worktreeRoot: null,
+      mainRepoRoot: null,
+    });
+
+    projects.set(
+      "p1",
+      createPersistedProjectRecord({
+        projectId: "p1",
+        rootPath: projectRoot,
+        kind: "non_git",
+        displayName: "timeout",
+        projectKey,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+    workspaces.set(
+      "w1",
+      createPersistedWorkspaceRecord({
+        workspaceId: "w1",
+        projectId: "p1",
+        cwd: hungWorkspace,
+        kind: "directory",
+        displayName: "hung-workspace",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      directoryStatTimeoutMs: 20,
+      statDirectory: async (targetPath) => {
+        if (targetPath === hungWorkspace) return new Promise(() => {});
+        return presentDirectory();
+      },
+    });
+
+    const result = await service.runOnce();
+    expect(result.changesApplied).toEqual([]);
+    expect(workspaces.get("w1")?.archivedAt).toBeNull();
+  });
+
+  test("inspects equivalent project and workspace paths once per pass", async () => {
+    const sharedPath = "/tmp/reconcile-shared-root";
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    const projectKey = deriveProjectKey({
+      rootPath: sharedPath,
+      remoteUrl: null,
+      worktreeRoot: null,
+      mainRepoRoot: null,
+    });
+    const inspected: string[] = [];
+
+    projects.set(
+      "p1",
+      createPersistedProjectRecord({
+        projectId: "p1",
+        rootPath: sharedPath,
+        kind: "non_git",
+        displayName: "shared",
+        projectKey,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+    workspaces.set(
+      "w1",
+      createPersistedWorkspaceRecord({
+        workspaceId: "w1",
+        projectId: "p1",
+        cwd: `${sharedPath}/`,
+        kind: "directory",
+        displayName: "shared-workspace",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      statDirectory: async (targetPath) => {
+        inspected.push(targetPath);
+        return presentDirectory();
+      },
+    });
+
+    await service.runOnce();
+    expect(inspected).toEqual([`${sharedPath}/`]);
+  });
+
+  test("inspects workspace directories with bounded concurrency", async () => {
+    const projectRoot = "/tmp/reconcile-concurrency-root";
+    const firstWorkspace = "/tmp/reconcile-concurrency-one";
+    const secondWorkspace = "/tmp/reconcile-concurrency-two";
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    const projectKey = deriveProjectKey({
+      rootPath: projectRoot,
+      remoteUrl: null,
+      worktreeRoot: null,
+      mainRepoRoot: null,
+    });
+    let started = 0;
+    let inFlight = 0;
+    let peakInFlight = 0;
+    const firstTwoStarted = deferred();
+    const release = deferred();
+
+    projects.set(
+      "p1",
+      createPersistedProjectRecord({
+        projectId: "p1",
+        rootPath: projectRoot,
+        kind: "non_git",
+        displayName: "concurrency",
+        projectKey,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+    workspaces.set(
+      "w1",
+      createPersistedWorkspaceRecord({
+        workspaceId: "w1",
+        projectId: "p1",
+        cwd: firstWorkspace,
+        kind: "directory",
+        displayName: "one",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+    workspaces.set(
+      "w2",
+      createPersistedWorkspaceRecord({
+        workspaceId: "w2",
+        projectId: "p1",
+        cwd: secondWorkspace,
+        kind: "directory",
+        displayName: "two",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      directoryStatConcurrency: 2,
+      statDirectory: async () => {
+        started += 1;
+        inFlight += 1;
+        peakInFlight = Math.max(peakInFlight, inFlight);
+        if (started === 2) firstTwoStarted.resolve();
+        await release.promise;
+        inFlight -= 1;
+        return presentDirectory();
+      },
+    });
+
+    const running = service.runOnce();
+    await firstTwoStarted.promise;
+    await Promise.resolve();
+    expect(started).toBe(2);
+    expect(peakInFlight).toBe(2);
+    release.resolve();
+    await running;
+    expect(started).toBe(3);
+    expect(peakInFlight).toBe(2);
   });
 
   test("reads fresh checkout facts on every metadata pass", async () => {
@@ -1558,6 +2028,420 @@ describe("WorkspaceReconciliationService", () => {
     await service.runOnce();
 
     expect(infoRecords).toEqual([]);
+  });
+
+  test("an unclassified root converges and reconciles on a later tick", async () => {
+    const rootPath = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-converge-")));
+    tempDirs.push(rootPath);
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    seedProject(projects, rootPath, { kind: "non_git" });
+    seedWorkspace(workspaces, "w1", "p1", rootPath, { kind: "directory" });
+
+    const git = new TestCheckouts();
+    git.set(rootPath, createCheckout(rootPath, { isGit: true, worktreeRoot: rootPath }));
+    const clock = new TestClock();
+    const policy = createTestGitActivity({ policy: "auto" });
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      workspaceGitService: git,
+      gitActivity: policy.gitActivity,
+      clock,
+      rescanIntervalMs: 5_000,
+      watchProjectRoot: inertRootWatch(),
+    });
+    await service.start();
+
+    // First tick: the root has no verdict, so it is skipped, and the skip asks
+    // the policy service to settle it.
+    await clock.advanceBy(5_000);
+    expect(git.reads).toEqual([]);
+    expect(policy.ensureCalls()).toEqual([rootPath]);
+    expect(projects.get("p1")?.kind).toBe("non_git");
+
+    // Second tick: classification landed, so the same timer reconciles.
+    await clock.advanceBy(5_000);
+    expect(git.reads).toEqual([rootPath]);
+    expect(projects.get("p1")?.kind).toBe("git");
+    expect(workspaces.get("w1")?.kind).toBe("local_checkout");
+    service.dispose();
+  });
+
+  test("convergence requests classification at most once in flight per root", async () => {
+    const rootPath = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-inflight-")));
+    tempDirs.push(rootPath);
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    seedProject(projects, rootPath);
+    seedWorkspace(workspaces, "w1", "p1", rootPath);
+
+    let release!: () => void;
+    const held = new Promise<void>((accept) => {
+      release = accept;
+    });
+    const clock = new TestClock();
+    const policy = createTestGitActivity({
+      policy: "auto",
+      classify: async () => {
+        await held;
+        return localVerdict();
+      },
+    });
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      workspaceGitService: new TestCheckouts(),
+      gitActivity: policy.gitActivity,
+      clock,
+      rescanIntervalMs: 1_000,
+      watchProjectRoot: inertRootWatch(),
+    });
+    await service.start();
+
+    // Many ticks while the probe is stalled: one in-flight request, not one per tick.
+    await clock.advanceBy(1_000);
+    await clock.advanceBy(1_000);
+    await clock.advanceBy(1_000);
+    expect(policy.ensureCalls()).toEqual([rootPath]);
+
+    release();
+    await clock.advanceBy(1_000);
+    await clock.advanceBy(1_000);
+    // The stalled probe settled as automatic, so no further request is needed.
+    expect(policy.ensureCalls()).toEqual([rootPath]);
+    service.dispose();
+  });
+
+  test("convergence never fires under a manual policy", async () => {
+    const rootPath = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-manual-")));
+    tempDirs.push(rootPath);
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    seedProject(projects, rootPath);
+    seedWorkspace(workspaces, "w1", "p1", rootPath);
+
+    const clock = new TestClock();
+    const policy = createTestGitActivity({ policy: "manual" });
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      workspaceGitService: new TestCheckouts(),
+      gitActivity: policy.gitActivity,
+      clock,
+      rescanIntervalMs: 1_000,
+      watchProjectRoot: inertRootWatch(),
+    });
+    await service.start();
+
+    await clock.advanceBy(1_000);
+    await clock.advanceBy(1_000);
+    await clock.advanceBy(1_000);
+
+    // Non-vacuity: this pins the unknown-only guard. Under `manual` the root is
+    // also "not automatic", so without the `peek` check the skipped read would
+    // call ensureClassification and this would be 3, not 0.
+    //
+    // The guard needs `peek` rather than `isAutomatic` because the two answers
+    // differ exactly where it matters: `isAutomatic` is false for both "the host
+    // said no" and "not classified yet", and only `peek` separates them. That is
+    // why reconciliation takes the policy service and not a boolean.
+    expect(policy.ensureCalls()).toEqual([]);
+    expect(policy.gitActivity.peek(rootPath).effectiveMode).toBe("manual");
+    service.dispose();
+  });
+
+  test("convergence never fires for an already-automatic root", async () => {
+    const rootPath = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-auto-")));
+    tempDirs.push(rootPath);
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    seedProject(projects, rootPath);
+    seedWorkspace(workspaces, "w1", "p1", rootPath);
+
+    const clock = new TestClock();
+    const policy = createTestGitActivity({ policy: "auto" });
+    // Settle the verdict before the service ever sees the root. `isAutomatic`
+    // only peeks, so this is the explicit pre-classification.
+    expect(await policy.settle(rootPath)).toBe(true);
+    const git = new TestCheckouts();
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      workspaceGitService: git,
+      gitActivity: policy.gitActivity,
+      clock,
+      rescanIntervalMs: 1_000,
+      watchProjectRoot: inertRootWatch(),
+    });
+    await service.start();
+
+    await clock.advanceBy(1_000);
+    await clock.advanceBy(1_000);
+
+    expect(policy.ensureCalls()).toEqual([]);
+    expect(git.reads).toEqual([rootPath, rootPath]);
+    service.dispose();
+  });
+
+  test("an aged-out verdict is skipped on that tick and reconciles on the next", async () => {
+    const rootPath = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-aged-")));
+    tempDirs.push(rootPath);
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    seedProject(projects, rootPath, { kind: "non_git" });
+    seedWorkspace(workspaces, "w1", "p1", rootPath, { kind: "directory" });
+
+    const git = new TestCheckouts();
+    git.set(rootPath, createCheckout(rootPath, { isGit: true, worktreeRoot: rootPath }));
+    const clock = new TestClock();
+    // The probe is held past the aged-out tick, so the skip cannot be hidden by
+    // a verdict that lands mid-tick.
+    let release!: () => void;
+    let held: Promise<void> | null = null;
+    const policy = createTestGitActivity({
+      policy: "auto",
+      cacheTtlMs: 60_000,
+      classify: async () => {
+        if (held) await held;
+        return localVerdict();
+      },
+    });
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      workspaceGitService: git,
+      gitActivity: policy.gitActivity,
+      clock,
+      rescanIntervalMs: 5_000,
+      watchProjectRoot: inertRootWatch(),
+    });
+    await service.start();
+
+    await clock.advanceBy(5_000);
+    await clock.advanceBy(5_000);
+    expect(git.reads).toEqual([rootPath]);
+    expect(projects.get("p1")?.kind).toBe("git");
+
+    // Past the 60s verdict TTL the stored verdict stops granting permission, so
+    // this tick reads `unknown` -- the same root, still skipped.
+    held = new Promise<void>((accept) => {
+      release = accept;
+    });
+    policy.advanceClock(60_000);
+    await clock.advanceBy(5_000);
+
+    expect(git.reads).toEqual([rootPath]);
+    expect(policy.gitActivity.isAutomatic(rootPath)).toBe(false);
+    expect(projects.get("p1")?.kind).toBe("git");
+
+    // The skipped tick asked for a fresh verdict; once it lands, the next tick
+    // reconciles again without any other trigger.
+    release();
+    held = null;
+    await flushMicrotasks();
+    await clock.advanceBy(5_000);
+
+    expect(policy.gitActivity.isAutomatic(rootPath)).toBe(true);
+    expect(git.reads).toEqual([rootPath, rootPath]);
+    service.dispose();
+  });
+
+  test("a manual tick reads no Git metadata but still archives a missing directory", async () => {
+    const rootPath = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-manual-root-")));
+    tempDirs.push(rootPath);
+    const missingDirectory = "/tmp/reconcile-manual-missing-workspace";
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    seedProject(projects, rootPath);
+    seedWorkspace(workspaces, "w1", "p1", rootPath);
+    seedWorkspace(workspaces, "w2", "p1", missingDirectory);
+
+    const git = new TestCheckouts();
+    const clock = new TestClock();
+    const policy = createTestGitActivity({ policy: "manual" });
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      workspaceGitService: git,
+      gitActivity: policy.gitActivity,
+      clock,
+      rescanIntervalMs: 1_000,
+      watchProjectRoot: inertRootWatch(),
+      statDirectory: async (targetPath) => {
+        if (targetPath === missingDirectory) throw createErrno("ENOENT", "missing");
+        return presentDirectory();
+      },
+    });
+    await service.start();
+
+    await clock.advanceBy(1_000);
+
+    expect(git.reads).toEqual([]);
+    expect(workspaces.get("w2")?.archivedAt).toEqual(expect.any(String));
+    service.dispose();
+  });
+
+  test("a manual tick leaves project identity untouched", async () => {
+    const rootPath = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-manual-identity-")));
+    tempDirs.push(rootPath);
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    const project = seedProject(projects, rootPath, {
+      kind: "git",
+      projectKey: "identity-key",
+    });
+    seedWorkspace(workspaces, "w1", "p1", rootPath, { kind: "local_checkout" });
+
+    const git = new TestCheckouts();
+    git.set(rootPath, createCheckout(rootPath, { remoteUrl: "git@github.com:acme/other.git" }));
+    const clock = new TestClock();
+    const policy = createTestGitActivity({ policy: "manual" });
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      workspaceGitService: git,
+      gitActivity: policy.gitActivity,
+      clock,
+      rescanIntervalMs: 1_000,
+      watchProjectRoot: inertRootWatch(),
+    });
+    await service.start();
+
+    await clock.advanceBy(1_000);
+
+    expect(git.reads).toEqual([]);
+    const after = projects.get("p1");
+    expect(after?.kind).toBe(project.kind);
+    expect(after?.projectKey).toBe(project.projectKey);
+    expect(after?.displayName).toBe(project.displayName);
+    service.dispose();
+  });
+
+  test("a manual tick leaves workspace placement untouched, including a worktree", async () => {
+    const rootPath = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-manual-placement-")));
+    tempDirs.push(rootPath);
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    seedProject(projects, rootPath);
+    const workspace = seedWorkspace(workspaces, "w1", "p1", rootPath, {
+      kind: "worktree",
+      worktreeRoot: rootPath,
+      mainRepoRoot: "/tmp/main-repo",
+      isPaseoOwnedWorktree: true,
+    });
+
+    const git = new TestCheckouts();
+    // What Git would really say: a plain directory. A skipped read must not leak
+    // this in any form -- that is what collapses the worktree placement.
+    git.set(rootPath, createCheckout(rootPath));
+    const clock = new TestClock();
+    const policy = createTestGitActivity({ policy: "manual" });
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      workspaceGitService: git,
+      gitActivity: policy.gitActivity,
+      clock,
+      rescanIntervalMs: 1_000,
+      watchProjectRoot: inertRootWatch(),
+    });
+    await service.start();
+
+    await clock.advanceBy(1_000);
+
+    expect(git.reads).toEqual([]);
+    const after = workspaces.get("w1");
+    expect(after?.kind).toBe(workspace.kind);
+    expect(after?.worktreeRoot).toBe(workspace.worktreeRoot);
+    expect(after?.mainRepoRoot).toBe(workspace.mainRepoRoot);
+    expect(after?.isPaseoOwnedWorktree).toBe(workspace.isPaseoOwnedWorktree);
+    service.dispose();
+  });
+
+  test("a mixed mount reads the admitted root and leaves the manual sibling alone", async () => {
+    const rootPath = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-mixed-root-")));
+    const siblingPath = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-mixed-sibling-")));
+    tempDirs.push(rootPath, siblingPath);
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    seedProject(projects, rootPath);
+    seedWorkspace(workspaces, "w1", "p1", rootPath, { kind: "local_checkout" });
+    seedWorkspace(workspaces, "w2", "p1", siblingPath, {
+      kind: "worktree",
+      worktreeRoot: siblingPath,
+      mainRepoRoot: "/tmp/main-repo",
+      isPaseoOwnedWorktree: true,
+    });
+
+    const git = new TestCheckouts();
+    git.set(rootPath, createCheckout(rootPath, { isGit: true, worktreeRoot: rootPath }));
+    git.set(siblingPath, createCheckout(siblingPath));
+    const clock = new TestClock();
+    const policy = createTestGitActivity({
+      policy: "auto",
+      classify: async (cwd) =>
+        cwd === path.resolve(siblingPath)
+          ? localVerdict({ class: "network", reason: "cwd_on_network_mount" })
+          : localVerdict(),
+    });
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      workspaceGitService: git,
+      gitActivity: policy.gitActivity,
+      clock,
+      rescanIntervalMs: 5_000,
+      watchProjectRoot: inertRootWatch(),
+    });
+    await service.start();
+
+    // Settles both verdicts, then reconciles only the admitted root.
+    await clock.advanceBy(5_000);
+    await clock.advanceBy(5_000);
+
+    expect(git.reads).toEqual([rootPath]);
+    expect(policy.gitActivity.isAutomatic(rootPath)).toBe(true);
+    expect(policy.gitActivity.isAutomatic(siblingPath)).toBe(false);
+    const sibling = workspaces.get("w2");
+    expect(sibling?.kind).toBe("worktree");
+    expect(sibling?.worktreeRoot).toBe(siblingPath);
+    expect(sibling?.mainRepoRoot).toBe("/tmp/main-repo");
+    expect(sibling?.isPaseoOwnedWorktree).toBe(true);
+    expect(workspaces.get("w1")?.kind).toBe("local_checkout");
+    service.dispose();
+  });
+
+  test("an automatic policy still reads Git metadata and updates kind", async () => {
+    const rootPath = realpathSync(mkdtempSync(path.join(tmpdir(), "reconcile-auto-kind-")));
+    tempDirs.push(rootPath);
+    const { projects, workspaces, projectRegistry, workspaceRegistry } = createTestRegistries();
+    seedProject(projects, rootPath, { kind: "non_git" });
+    seedWorkspace(workspaces, "w1", "p1", rootPath, { kind: "directory" });
+
+    const git = new TestCheckouts();
+    git.set(rootPath, createCheckout(rootPath, { isGit: true, worktreeRoot: rootPath }));
+    const clock = new TestClock();
+    const policy = createTestGitActivity({ policy: "enabled" });
+    const service = new WorkspaceReconciliationService({
+      projectRegistry,
+      workspaceRegistry,
+      logger: createTestLogger(),
+      workspaceGitService: git,
+      gitActivity: policy.gitActivity,
+      clock,
+      rescanIntervalMs: 1_000,
+      watchProjectRoot: inertRootWatch(),
+    });
+    await service.start();
+
+    await clock.advanceBy(1_000);
+
+    expect(policy.ensureCalls()).toEqual([]);
+    expect(git.reads).toEqual([rootPath]);
+    expect(projects.get("p1")?.kind).toBe("git");
+    expect(workspaces.get("w1")?.kind).toBe("local_checkout");
+    service.dispose();
   });
 
   test("backfills persisted worktree ownership from the current checkout", async () => {

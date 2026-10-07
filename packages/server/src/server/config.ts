@@ -7,6 +7,7 @@ import { z } from "zod";
 import { expandTilde } from "../utils/path.js";
 
 import type { PaseoDaemonConfig } from "./bootstrap.js";
+import { normalizeGitActivityPolicy, type GitActivityPolicy } from "@getpaseo/protocol/messages";
 import {
   loadPersistedConfig,
   LogFormatSchema,
@@ -99,14 +100,44 @@ function normalizeLogEnv(value: string | undefined): string | undefined {
   return value.trim().toLowerCase();
 }
 
+/**
+ * Effective Git config: the process limits plus the host-global activity policy.
+ * `PaseoDaemonConfig["git"]` declares `policy` directly, so this is just a name
+ * for that shape.
+ */
+export type PaseoDaemonGitConfig = NonNullable<PaseoDaemonConfig["git"]>;
+
+/**
+ * The policy is host-global and config-file owned: no environment variable and no
+ * per-project override. An absent value is normalized to `auto` here rather than in
+ * the wire schema, so old configs and old daemons stay parseable.
+ */
+export function resolveGitActivityPolicy(persisted: PersistedConfig): GitActivityPolicy {
+  return normalizeGitActivityPolicy(persisted.daemon?.git?.policy);
+}
+
+/**
+ * Reads the policy from any config object carrying `git.policy` — the launch
+ * config or the mutable store's projection. Both declare the field, so there is
+ * no cast and no second source of truth for the default.
+ */
+export function getGitActivityPolicy(config: {
+  git?: { policy?: GitActivityPolicy | undefined } | null;
+}): GitActivityPolicy {
+  return normalizeGitActivityPolicy(config.git?.policy);
+}
+
 function resolveGitProcessConfig(
   env: NodeJS.ProcessEnv,
   persisted: ReturnType<typeof loadPersistedConfig>,
-): NonNullable<PaseoDaemonConfig["git"]> {
-  return resolveGitProcessPolicy({
-    env,
-    persisted: persisted.daemon?.git,
-  });
+): PaseoDaemonGitConfig {
+  return {
+    ...resolveGitProcessPolicy({
+      env,
+      persisted: persisted.daemon?.git,
+    }),
+    policy: resolveGitActivityPolicy(persisted),
+  };
 }
 
 export type CliConfigOverrides = Partial<{

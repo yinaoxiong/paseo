@@ -24,12 +24,15 @@ import type {
   WorkspaceGitService,
 } from "../../workspace-git-service.js";
 import {
+  createAllowingGitActivityPolicy,
+  createManualGitActivityPolicy,
   createNoGitWorkspaceRuntimeSnapshot,
   createNoopWorkspaceGitService,
 } from "../../test-utils/workspace-git-service-stub.js";
 import { createWorktree, deletePaseoWorktree } from "../../../utils/worktree.js";
 import { expandTilde } from "../../../utils/path.js";
 import type { GitMetadataGenerator } from "./git-metadata-generator.js";
+import type { GitActivityPolicyService } from "../../git-activity/policy.js";
 
 function isCheckDetailsResponse(msg: SessionOutboundMessage): boolean {
   return msg.type === "checkout.forge.get_check_details.response";
@@ -114,6 +117,8 @@ function makeCheckoutSession(options?: {
   host?: Partial<CheckoutSessionHost>;
   gitMutation?: Partial<GitMutationFake>;
   gitMetadataGenerator?: Partial<GitMetadataGenerator>;
+  /** Host-global Git activity admission; absent means "no policy injected". */
+  gitActivity?: GitActivityPolicyService;
 }) {
   const emitted: SessionOutboundMessage[] = [];
   const hostCalls: RecordedHostCalls = {
@@ -176,6 +181,7 @@ function makeCheckoutSession(options?: {
     paseoHome: options?.paseoHome ?? "/tmp/paseo-home",
     worktreesRoot: undefined,
     logger: pino({ level: "silent" }),
+    ...(options?.gitActivity ? { gitActivity: options.gitActivity } : {}),
   });
   const delivery = new SessionDelivery((_source, message) => emitted.push(message));
   return {
@@ -398,6 +404,84 @@ describe("CheckoutSession", () => {
     });
   });
 
+  function createGitRuntimeSnapshot(cwd: string): WorkspaceGitRuntimeSnapshot {
+    return {
+      cwd,
+      git: {
+        isGit: true,
+        repoRoot: cwd,
+        mainRepoRoot: null,
+        currentBranch: "main",
+        remoteUrl: null,
+        isPaseoOwnedWorktree: false,
+        isDirty: false,
+        baseRef: "main",
+        aheadBehind: null,
+        upstreamRef: null,
+        aheadOfOrigin: 0,
+        behindOfOrigin: 0,
+        hasRemote: false,
+        diffStat: null,
+      },
+      forge: {
+        featuresEnabled: false,
+        authState: "no_remote",
+        pullRequest: null,
+        error: null,
+      },
+    } as unknown as WorkspaceGitRuntimeSnapshot;
+  }
+
+  function findEmitted(emitted: SessionOutboundMessage[], type: string) {
+    return emitted.find((message) => message.type === type);
+  }
+
+  describe("refresh delivery failure", () => {
+    /**
+     * A refresh that read Git but could not deliver the result must NOT report
+     * success: the user would see a refresh that "worked" and changed nothing.
+     */
+    it("reports failure when the snapshot cannot be projected", async () => {
+      const { checkout, emitted } = makeCheckoutSession({
+        git: {
+          // A snapshot that getSnapshot returns but the projection cannot read.
+          getSnapshot: async (cwd: string) =>
+            ({ cwd, git: { isGit: true, repoRoot: null }, forge: null }) as never,
+        },
+      });
+
+      await checkout.handleRefreshRequest({
+        type: "checkout.refresh.request",
+        cwd: "/repo",
+        requestId: "r-projection",
+      });
+
+      const response = findEmitted(emitted, "checkout.refresh.response");
+      expect(response?.payload.success).toBe(false);
+      expect(response?.payload.error).toMatchObject({ code: "NOT_ALLOWED" });
+      expect(response?.payload.error?.message).toMatch(/could not deliver the result/);
+    });
+
+    it("a successful refresh still reports success and delivers status", async () => {
+      const { checkout, emitted } = makeCheckoutSession({
+        git: {
+          getSnapshot: async (cwd: string) => createGitRuntimeSnapshot(cwd),
+        },
+      });
+
+      await checkout.handleRefreshRequest({
+        type: "checkout.refresh.request",
+        cwd: "/repo",
+        requestId: "r-ok",
+      });
+
+      const response = findEmitted(emitted, "checkout.refresh.response");
+      expect(response?.payload.success).toBe(true);
+      expect(response?.payload.error).toBeNull();
+      expect(response?.payload.status).toMatchObject({ isGit: true, currentBranch: "main" });
+    });
+  });
+
   describe("refresh", () => {
     it("forces a github-inclusive snapshot, nudges diffs, and confirms success", async () => {
       const snapshotCalls: Array<{ cwd: string; options: unknown }> = [];
@@ -426,12 +510,18 @@ describe("CheckoutSession", () => {
         { cwd: "/repo", options: { force: true, includeForge: true, reason: "manual-refresh" } },
       ]);
       expect(refreshedCwds).toEqual(["/repo"]);
-      expect(emitted).toEqual([
-        {
-          type: "checkout.refresh.response",
-          payload: { cwd: "/repo", success: true, error: null, requestId: "r7" },
-        },
-      ]);
+
+      // Manual mode has no live observer, so the refresh publishes the status
+      // itself and returns the snapshot in the response. Both are asserted: an
+      // observer-dependent delivery would silently leave the client stale.
+      const statusUpdate = findEmitted(emitted, "checkout_status_update");
+      expect(statusUpdate).toBeDefined();
+      expect(statusUpdate?.payload.cwd).toBe("/repo");
+      expect(statusUpdate?.payload.lastRefreshedAt).toEqual(expect.any(String));
+
+      const response = findEmitted(emitted, "checkout.refresh.response");
+      expect(response?.payload.success).toBe(true);
+      expect(response?.payload.status).toMatchObject({ cwd: "/repo", isGit: false });
     });
 
     it("expands a tilde cwd before refreshing git and diffs", async () => {
@@ -1486,6 +1576,142 @@ describe("CheckoutSession", () => {
         },
       ]);
     });
+
+    /**
+     * A legacy PR-status request is automatic Git activity: clients re-issue it
+     * on mount, focus and reconnect. Under manual or unknown it must perform
+     * ZERO Git and ZERO forge work — including the error fallback, which
+     * resolves the forge and is therefore its own I/O.
+     */
+    function makeCountingGit(overrides?: Partial<WorkspaceGitService>) {
+      const counts = { getSnapshot: 0, resolveForge: 0, peekSnapshot: 0 };
+      return {
+        counts,
+        git: {
+          getSnapshot: async () => {
+            counts.getSnapshot += 1;
+            throw new Error("glab returned invalid JSON");
+          },
+          resolveForge: async () => {
+            counts.resolveForge += 1;
+            return {
+              forge: "gitlab",
+              host: "gitlab.example.com",
+              service: {} as ForgeService,
+            };
+          },
+          peekSnapshot: () => {
+            counts.peekSnapshot += 1;
+            return null;
+          },
+          ...overrides,
+        } as Partial<WorkspaceGitService>,
+      };
+    }
+
+    it("performs zero git and forge work for repeated manual requests", async () => {
+      const { counts, git } = makeCountingGit();
+      const { checkout, emitted } = makeCheckoutSession({
+        git,
+        gitActivity: createManualGitActivityPolicy(),
+      });
+
+      // Three reconnect-style requests: each must be refused without I/O.
+      for (let index = 0; index < 3; index += 1) {
+        await checkout.handleCheckoutPrStatusRequest({
+          type: "checkout_pr_status_request",
+          cwd: "/repo",
+          requestId: `ps-manual-${index}`,
+        });
+      }
+
+      expect(counts.getSnapshot, "no Git snapshot read").toBe(0);
+      expect(counts.resolveForge, "no forge resolution in the error fallback").toBe(0);
+      // The response stays in the existing parseable shape old clients read.
+      expect(emitted).toHaveLength(3);
+      for (const message of emitted) {
+        expect(message.type).toBe("checkout_pr_status_response");
+        if (message.type !== "checkout_pr_status_response") continue;
+        expect(message.payload.error?.code).toBe("NOT_ALLOWED");
+        expect(message.payload.status).toBeNull();
+      }
+    }, 20_000);
+
+    it("performs zero git and forge work when the verdict is unknown", async () => {
+      const { counts, git } = makeCountingGit();
+      const { checkout, emitted } = makeCheckoutSession({
+        git,
+        // `unknown` (unclassified storage) is treated exactly like manual.
+        gitActivity: createManualGitActivityPolicy({
+          configuredPolicy: "auto",
+          reason: "classification_pending",
+        }),
+      });
+
+      await checkout.handleCheckoutPrStatusRequest({
+        type: "checkout_pr_status_request",
+        cwd: "/repo",
+        requestId: "ps-unknown",
+      });
+
+      expect(counts.getSnapshot).toBe(0);
+      expect(counts.resolveForge).toBe(0);
+      expect(emitted).toHaveLength(1);
+      const first = emitted[0];
+      if (first?.type === "checkout_pr_status_response") {
+        expect(first.payload.error?.code).toBe("NOT_ALLOWED");
+      }
+    }, 20_000);
+
+    it("serves a cached snapshot without reading git when manual", async () => {
+      const cached = createGitSnapshot("/repo", "main");
+      const { counts, git } = makeCountingGit({
+        peekSnapshot: () => cached,
+      });
+      const { checkout, emitted } = makeCheckoutSession({
+        git,
+        gitActivity: createManualGitActivityPolicy(),
+      });
+
+      await checkout.handleCheckoutPrStatusRequest({
+        type: "checkout_pr_status_request",
+        cwd: "/repo",
+        requestId: "ps-cached",
+      });
+
+      expect(counts.getSnapshot).toBe(0);
+      expect(counts.resolveForge).toBe(0);
+      const first = emitted[0];
+      if (first?.type === "checkout_pr_status_response") {
+        expect(first.payload.error).toBeNull();
+        expect(first.payload.requestId).toBe("ps-cached");
+      }
+    }, 20_000);
+
+    it("still reads git when the workspace is admitted", async () => {
+      let reads = 0;
+      const { checkout, emitted } = makeCheckoutSession({
+        git: {
+          getSnapshot: async (cwd: string) => {
+            reads += 1;
+            return createGitSnapshot(cwd, "main");
+          },
+        },
+        gitActivity: createAllowingGitActivityPolicy(),
+      });
+
+      await checkout.handleCheckoutPrStatusRequest({
+        type: "checkout_pr_status_request",
+        cwd: "/repo",
+        requestId: "ps-admitted",
+      });
+
+      expect(reads).toBe(1);
+      const first = emitted[0];
+      if (first?.type === "checkout_pr_status_response") {
+        expect(first.payload.error).toBeNull();
+      }
+    }, 20_000);
 
     it("resolves the forge once when reporting a non-auth status error", async () => {
       let resolveForgeCalls = 0;

@@ -362,6 +362,9 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
     // adapter's cache. The resolved forge here is github, so delegate to it.
     invalidateForge: vi.fn((cwd: string) => github.invalidate({ cwd })),
     getProjectSlug: vi.fn(),
+    // Subscribed by the session so a self-driven classification landing can
+    // re-broadcast the projection.
+    onGitActivityStateChanged: vi.fn(() => ({ unsubscribe: () => {} })),
     ...options.workspaceGitService,
   };
   const messages = options.messages ?? [];
@@ -3825,7 +3828,28 @@ describe("session checkout refresh handling", () => {
   test("forces a git, GitHub, and diff refresh on demand", async () => {
     const messages: unknown[] = [];
     const github = { invalidate: vi.fn() };
-    const workspaceGitService = { getSnapshot: vi.fn().mockResolvedValue({}) };
+    const workspaceGitService = {
+      getSnapshot: vi.fn().mockResolvedValue({
+        cwd: "/tmp/request-worktree",
+        git: {
+          isGit: true,
+          repoRoot: "/tmp/request-worktree",
+          mainRepoRoot: null,
+          currentBranch: "main",
+          remoteUrl: null,
+          isPaseoOwnedWorktree: false,
+          isDirty: false,
+          baseRef: "main",
+          aheadBehind: null,
+          upstreamRef: null,
+          aheadOfOrigin: 0,
+          behindOfOrigin: 0,
+          hasRemote: false,
+          diffStat: null,
+        },
+        forge: { featuresEnabled: false, pullRequest: null, error: null },
+      }),
+    };
     const checkoutDiffManager = { scheduleRefreshForCwd: vi.fn() };
     const session = createSessionForTest({
       github,
@@ -3847,15 +3871,17 @@ describe("session checkout refresh handling", () => {
       reason: "manual-refresh",
     });
     expect(checkoutDiffManager.scheduleRefreshForCwd).toHaveBeenCalledWith("/tmp/request-worktree");
-    expect(messages).toContainEqual({
-      type: "checkout.refresh.response",
-      payload: {
-        cwd: "/tmp/request-worktree",
-        success: true,
-        error: null,
-        requestId: "request-refresh",
-      },
-    });
+
+    // The response now carries the snapshot it produced: manual mode has no live
+    // observer, so the client must not have to re-issue a status request that
+    // manual mode would refuse to serve.
+    const response = messages.find(
+      (message): message is { type: string; payload: Record<string, unknown> } =>
+        (message as { type?: string }).type === "checkout.refresh.response",
+    );
+    expect(response?.payload.success).toBe(true);
+    expect(response?.payload.error).toBeNull();
+    expect(response?.payload.status).toBeDefined();
   });
 
   test("reports an error when the snapshot refresh fails", async () => {

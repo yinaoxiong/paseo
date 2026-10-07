@@ -952,6 +952,9 @@ export const ja: TranslationResources = {
         refresh: "更新",
         refreshState: "gitと{{brand}}の状態を更新",
         failedRefresh: "gitの状態の更新に失敗しました。",
+        manualRefreshHostUpdate:
+          "手動モードで Git の変更を更新するには、ホストを更新してください。",
+        manualRefreshRequired: "Git の自動更新は一時停止中です。更新して差分を読み込んでください。",
         seeUncommittedChanges: "未コミットの変更を表示",
         seeCommittedChanges: "コミット済みの変更を表示",
         checkingRepository: "リポジトリを確認中...",

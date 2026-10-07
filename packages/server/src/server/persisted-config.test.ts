@@ -291,6 +291,26 @@ describe("provider overrides (new format)", () => {
     });
   });
 
+  test("override cursor-sdk built-in provider with env only", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: {
+        providers: {
+          "cursor-sdk": {
+            env: {
+              CURSOR_API_KEY: "sk-test",
+            },
+          },
+        },
+      },
+    });
+
+    expect(parsed.agents?.providers?.["cursor-sdk"]).toEqual({
+      env: {
+        CURSOR_API_KEY: "sk-test",
+      },
+    });
+  });
+
   test("new provider extending claude with label", () => {
     const parsed = PersistedConfigSchema.parse({
       agents: {
@@ -663,6 +683,48 @@ describe("PersistedConfigSchema voice mode config", () => {
 
     expect(parsed.features?.dictation?.stt?.language).toBe("fr");
     expect(parsed.features?.voiceMode?.stt?.language).toBe("de");
+  });
+});
+
+describe("PersistedConfigSchema daemon Git activity policy", () => {
+  test("accepts an explicit host-global policy", () => {
+    for (const policy of ["auto", "manual", "enabled"] as const) {
+      const parsed = PersistedConfigSchema.parse({ daemon: { git: { policy } } });
+      expect(parsed.daemon?.git?.policy).toBe(policy);
+    }
+  });
+
+  test("leaves the policy absent for old configs", () => {
+    const parsed = PersistedConfigSchema.parse({
+      daemon: { git: { maxProcessesPerSecond: 5, maxProcessConcurrency: 4 } },
+    });
+
+    expect(parsed.daemon?.git).toEqual({
+      maxProcessesPerSecond: 5,
+      maxProcessConcurrency: 4,
+    });
+  });
+
+  test("rejects an unknown policy", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({ daemon: { git: { policy: "project-auto" } } }),
+    ).toThrow(/Invalid/);
+  });
+
+  test("round-trips the policy through save and load", () => {
+    const home = createTempHome();
+    try {
+      savePersistedConfig(home, {
+        daemon: { git: { maxProcessConcurrency: 2, policy: "manual" } },
+      });
+
+      const reloaded = loadPersistedConfig(home);
+
+      expect(reloaded.daemon?.git?.policy).toBe("manual");
+      expect(reloaded.daemon?.git?.maxProcessConcurrency).toBe(2);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 

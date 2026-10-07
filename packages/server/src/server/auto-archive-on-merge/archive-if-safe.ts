@@ -16,9 +16,16 @@ import type { ForgeService } from "../../services/forge-service.js";
 import type { TerminalManager } from "../../terminal/terminal-manager.js";
 import { isPaseoOwnedWorktreeCwd } from "../../utils/worktree.js";
 import type { WorkspaceArchiveContext } from "../workspace-registry.js";
+import type { GitActivityPolicyService } from "../git-activity/policy.js";
 
 export interface AutoArchiveArchiveOptions {
   paseoHome: string;
+  /**
+   * Host-global Git activity admission. When set, a workspace that is not
+   * admitted is never auto-archived: the snapshot behind the decision would be
+   * stale, because the policy stopped refreshing it.
+   */
+  gitActivity?: GitActivityPolicyService;
   paseoWorktreesBaseRoot?: string;
   daemonConfigStore: DaemonConfigStore;
   workspaceGitService: WorkspaceGitServiceImpl;
@@ -59,6 +66,9 @@ export async function archiveIfSafe(input: {
   const cwd = snapshot.cwd;
   const pullRequest = snapshot.forge.pullRequest;
 
+  if (options.gitActivity && !options.gitActivity.isAutomatic(cwd)) {
+    return;
+  }
   if (!pullRequest?.isMerged) {
     return;
   }

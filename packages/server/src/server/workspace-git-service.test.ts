@@ -3,12 +3,14 @@ import os from "node:os";
 import path, { join } from "node:path";
 import type pino from "pino";
 import type { ForgeService } from "../services/forge-service.js";
+import type { GitActivityPolicyService } from "./git-activity/policy.js";
 import type {
   CheckoutSnapshotFacts,
   CheckoutStatusGit,
   PullRequestStatusResult,
 } from "../utils/checkout-git.js";
 import {
+  FORGE_PR_STATUS_POLL_SLOW_INTERVAL_MS,
   WORKSPACE_GIT_OBSERVATION_SETUP_CONCURRENCY,
   WORKSPACE_GIT_REFRESH_CONCURRENCY,
   WORKSPACE_GIT_WATCHER_SUBSCRIBE_TIMEOUT_MS,
@@ -206,6 +208,37 @@ function createAsyncSubscription() {
   };
 }
 
+function createGitActivityPolicyStub(automatic: boolean): GitActivityPolicyService {
+  return {
+    isAutomatic: vi.fn(() => automatic),
+    peek: vi.fn(() => ({
+      configuredPolicy: automatic ? "enabled" : "manual",
+      effectiveMode: automatic ? "automatic" : "manual",
+      reason: "test",
+      lastCheckedAt: null,
+    })),
+    resolve: vi.fn(async () => ({
+      configuredPolicy: automatic ? "enabled" : "manual",
+      effectiveMode: automatic ? "automatic" : "manual",
+      reason: "test",
+      lastCheckedAt: null,
+    })),
+    ensureClassification: vi.fn(async (cwd: string) => ({ cwd, automatic })),
+    refreshPolicy: vi.fn(),
+    invalidate: vi.fn(),
+    invalidateMountTable: vi.fn(),
+    dispose: vi.fn(),
+  };
+}
+
+function createManualGitActivity(): GitActivityPolicyService {
+  return createGitActivityPolicyStub(false);
+}
+
+function createAutomaticGitActivity(): GitActivityPolicyService {
+  return createGitActivityPolicyStub(true);
+}
+
 function createGitHubServiceStub(): ForgeService {
   return {
     listPullRequests: vi.fn(async () => []),
@@ -236,6 +269,7 @@ function createGitHubServiceStub(): ForgeService {
       isCrossRepository: false,
     })),
     getCurrentPullRequestStatus: vi.fn(async () => null),
+    retainCurrentPullRequestStatusPoll: vi.fn(() => ({ unsubscribe: vi.fn() })),
     createPullRequest: vi.fn(async () => ({
       url: "https://github.com/acme/repo/pull/1",
       number: 1,
@@ -261,6 +295,7 @@ interface CreateServiceTestOptions {
   runGitCommand?: ReturnType<typeof vi.fn>;
   getWorkspaceGitSelfHealPhaseMs?: (cwd: string) => number;
   now?: () => Date;
+  gitActivity?: GitActivityPolicyService;
 }
 
 function buildDefaultTestServiceDeps() {
@@ -303,9 +338,13 @@ function buildDefaultTestServiceDeps() {
 }
 
 function createService(options?: CreateServiceTestOptions) {
-  const deps = { ...buildDefaultTestServiceDeps(), ...options };
+  const { gitActivity: gitActivityOption, ...depOptions } = options ?? {};
+  const deps = { ...buildDefaultTestServiceDeps(), ...depOptions };
+  if (depOptions.github) {
+    deps.forgeOverrides = { ...deps.forgeOverrides, github: depOptions.github };
+  }
   deps.getCheckoutWorktreeState =
-    options?.getCheckoutWorktreeState ??
+    depOptions.getCheckoutWorktreeState ??
     vi.fn(async (cwd: string) => {
       const status = await deps.getCheckoutStatus(cwd);
       if (!status.isGit) {
@@ -320,6 +359,7 @@ function createService(options?: CreateServiceTestOptions) {
     logger: createLogger() as unknown as pino.Logger,
     paseoHome: "/tmp/paseo-test",
     deps,
+    ...(gitActivityOption ? { gitActivity: gitActivityOption } : {}),
   });
 }
 
@@ -1435,6 +1475,74 @@ describe("WorkspaceGitServiceImpl", () => {
     await service.getCheckoutDiff("/tmp/repo-0", { mode: "uncommitted" });
     expect(getCheckoutDiff).toHaveBeenCalledTimes(CACHE_MAX + OVERFLOW + 1);
 
+    service.dispose();
+  });
+
+  test("an explicit refresh does not arm the retained GitHub PR status poll under a manual policy", async () => {
+    const retainCurrentPullRequestStatusPoll = vi.fn(() => ({ unsubscribe: vi.fn() }));
+    const github = {
+      ...createGitHubServiceStub(),
+      retainCurrentPullRequestStatusPoll,
+    };
+    const service = createService({
+      github,
+      gitActivity: createManualGitActivity(),
+    });
+
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    await service.refresh(REPO_CWD);
+    await flushPromises();
+
+    expect(retainCurrentPullRequestStatusPoll).not.toHaveBeenCalled();
+
+    subscription.unsubscribe();
+    service.dispose();
+  });
+
+  test("an explicit refresh does not arm the generic PR status poll under a manual policy", async () => {
+    const getCurrentPullRequestStatus = vi.fn(async () => null);
+    const forge = {
+      ...createGitHubServiceStub(),
+      // No retained poll: this forge takes the generic timer path.
+      retainCurrentPullRequestStatusPoll: undefined,
+      getCurrentPullRequestStatus,
+    };
+    const service = createService({
+      github: forge,
+      gitActivity: createManualGitActivity(),
+    });
+
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    await service.refresh(REPO_CWD);
+    await flushPromises();
+
+    await vi.advanceTimersByTimeAsync(FORGE_PR_STATUS_POLL_SLOW_INTERVAL_MS);
+    await flushPromises();
+
+    expect(getCurrentPullRequestStatus).not.toHaveBeenCalled();
+
+    subscription.unsubscribe();
+    service.dispose();
+  });
+
+  test("an explicit refresh arms the retained GitHub PR status poll when automatic", async () => {
+    const retainCurrentPullRequestStatusPoll = vi.fn(() => ({ unsubscribe: vi.fn() }));
+    const github = {
+      ...createGitHubServiceStub(),
+      retainCurrentPullRequestStatusPoll,
+    };
+    const service = createService({
+      github,
+      gitActivity: createAutomaticGitActivity(),
+    });
+
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    await service.refresh(REPO_CWD);
+    await flushPromises();
+
+    expect(retainCurrentPullRequestStatusPoll).toHaveBeenCalledTimes(1);
+
+    subscription.unsubscribe();
     service.dispose();
   });
 });

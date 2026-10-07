@@ -123,6 +123,7 @@ export interface WorkspaceDescriptor {
   diffStat: { additions: number; deletions: number } | null;
   scripts: WorkspaceDescriptorPayload["scripts"];
   gitRuntime?: WorkspaceDescriptorPayload["gitRuntime"];
+  gitActivity?: WorkspaceDescriptorPayload["gitActivity"];
   githubRuntime?: WorkspaceDescriptorPayload["githubRuntime"];
   forge?: WorkspaceDescriptorPayload["forge"];
   project?: ProjectPlacementPayload;
@@ -161,6 +162,7 @@ export function normalizeWorkspaceDescriptor(
     diffStat: payload.diffStat ?? null,
     scripts: (payload.scripts ?? []).map((s) => Object.assign({}, s)),
     gitRuntime: payload.gitRuntime,
+    gitActivity: payload.gitActivity,
     githubRuntime: payload.githubRuntime,
     forge: payload.forge,
     project: payload.project,

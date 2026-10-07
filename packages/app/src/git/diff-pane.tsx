@@ -62,6 +62,7 @@ import { GIT_ACTION_ICONS } from "@/git/action-icons";
 import { buildForgeSignInCommand, getForgePresentation, type Forge } from "@/git/forge";
 import { parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
 import type { ForgeAuthState } from "@getpaseo/protocol/messages";
+import { useChangesRefresh } from "@/git/use-changes-refresh";
 import { useCheckoutGitActionsStore } from "@/git/actions-store";
 import { useToast } from "@/contexts/toast-context";
 import { useSessionStore } from "@/stores/session-store";
@@ -1041,12 +1042,52 @@ function ChangesDiffOptions({ options }: { options: ChangesToolbarDiffOptions })
 
 const ThemedRotateCw = withUnistyles(RotateCw);
 
+function ChangesRefreshFeedback({
+  isGit,
+  supported,
+  refresh,
+}: {
+  isGit: boolean;
+  supported: boolean;
+  refresh: ReturnType<typeof useChangesRefresh>;
+}) {
+  const { t } = useTranslation();
+  const label = refresh.isRefreshing
+    ? t("workspace.git.diff.refreshing")
+    : t("workspace.git.diff.refresh");
+  return (
+    <>
+      {!isGit && supported ? (
+        <View style={styles.changesToolbar}>
+          <Button
+            variant="ghost"
+            size="sm"
+            testID="changes-refresh"
+            accessibilityLabel={label}
+            disabled={refresh.isRefreshing}
+            loading={refresh.isRefreshing}
+            onPress={refresh.onRefresh}
+          >
+            {label}
+          </Button>
+        </View>
+      ) : null}
+      {refresh.error ? (
+        <Text style={styles.actionErrorText} testID="changes-refresh-error">
+          {refresh.error}
+        </Text>
+      ) : null}
+    </>
+  );
+}
+
 interface DiffBodyContentProps {
   isStatusLoading: boolean;
   statusErrorMessage: string | null;
   notGit: boolean;
   isDiffLoading: boolean;
   diffErrorMessage: string | null;
+  diffNeedsRefresh: boolean;
   diffTooLarge: boolean;
   hasChanges: boolean;
   emptyMessage: string;
@@ -1062,6 +1103,7 @@ function DiffBodyContent({
   notGit,
   isDiffLoading,
   diffErrorMessage,
+  diffNeedsRefresh,
   diffTooLarge,
   hasChanges,
   emptyMessage,
@@ -1070,6 +1112,7 @@ function DiffBodyContent({
   checkingRepositoryLabel,
   notRepositoryLabel,
 }: DiffBodyContentProps) {
+  const { t } = useTranslation();
   if (isStatusLoading) {
     return (
       <View style={styles.loadingContainer}>
@@ -1089,6 +1132,13 @@ function DiffBodyContent({
     return (
       <View style={styles.emptyContainer} testID="changes-not-git">
         <Text style={styles.emptyText}>{notRepositoryLabel}</Text>
+      </View>
+    );
+  }
+  if (diffNeedsRefresh) {
+    return (
+      <View style={styles.emptyContainer}>
+        <Text style={styles.emptyText}>{t("workspace.git.diff.manualRefreshRequired")}</Text>
       </View>
     );
   }
@@ -1517,19 +1567,6 @@ export function ChangesSurface({
   const fsEntryDuplicateEnabled = useSessionStore(
     (state) => state.sessions[serverId]?.serverInfo?.features?.fsEntryDuplicate === true,
   );
-  const runRefresh = useCheckoutGitActionsStore((s) => s.refresh);
-  const isRefreshing =
-    useCheckoutGitActionsStore((s) => s.getStatus({ serverId, cwd, actionId: "refresh" })) ===
-    "pending";
-
-  const handleRefresh = useCallback(() => {
-    if (isRefreshing) {
-      return;
-    }
-    void runRefresh({ serverId, cwd }).catch((error) => {
-      toast.error(error instanceof Error ? error.message : t("workspace.git.diff.failedRefresh"));
-    });
-  }, [cwd, isRefreshing, runRefresh, serverId, t, toast]);
 
   const {
     status,
@@ -1546,6 +1583,8 @@ export function ChangesSurface({
     diffPayloadError,
     diffTooLarge,
     isDiffLoading,
+    diffNeedsRefresh,
+    explicitOnly,
     reviewActions,
     reviewAttachment,
   } = useWorkingDiff({
@@ -1555,6 +1594,14 @@ export function ChangesSurface({
     ignoreWhitespace: preferences.hideWhitespace,
     enabled: enabled !== false,
   });
+  const refresh = useChangesRefresh({
+    serverId,
+    cwd,
+    workspaceId,
+    explicitOnly,
+    ignoreWhitespace: preferences.hideWhitespace,
+  });
+  const { isRefreshing, onRefresh: handleRefresh } = refresh;
   usePublishWorkingDiffAttachment({
     serverId,
     workspaceId: workspaceId ?? undefined,
@@ -1784,6 +1831,7 @@ export function ChangesSurface({
       notGit={notGit}
       isDiffLoading={isDiffLoading}
       diffErrorMessage={diffErrorMessage}
+      diffNeedsRefresh={diffNeedsRefresh}
       diffTooLarge={diffTooLarge}
       hasChanges={hasChanges}
       emptyMessage={emptyMessage}
@@ -1918,6 +1966,8 @@ export function ChangesSurface({
           sidebarSurface={presentation === "tree"}
         />
       ) : null}
+
+      <ChangesRefreshFeedback isGit={isGit} supported={refreshSupported} refresh={refresh} />
 
       {forgeSetupMessage ? (
         <View style={styles.forgeSetupCallout} testID="forge-setup-callout">

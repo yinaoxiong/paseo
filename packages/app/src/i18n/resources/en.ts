@@ -947,6 +947,8 @@ export const en = {
         refresh: "Refresh",
         refreshState: "Refresh git and {{brand}} state",
         failedRefresh: "Failed to refresh git state.",
+        manualRefreshHostUpdate: "Update the host to refresh Git changes in manual mode.",
+        manualRefreshRequired: "Automatic Git updates are paused. Refresh to read this diff.",
         seeUncommittedChanges: "See uncommitted changes",
         seeCommittedChanges: "See committed changes",
         checkingRepository: "Checking repository...",

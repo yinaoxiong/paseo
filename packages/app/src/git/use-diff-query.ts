@@ -15,6 +15,7 @@ interface UseCheckoutDiffQueryOptions {
   ignoreWhitespace?: boolean;
   enabled?: boolean;
   queryScope?: string;
+  explicitOnly?: boolean;
 }
 
 type CheckoutDiffQueryPayload = Omit<SubscribeCheckoutDiffResponse["payload"], "subscriptionId">;
@@ -48,6 +49,7 @@ export function useCheckoutDiffQuery({
   ignoreWhitespace,
   enabled = true,
   queryScope,
+  explicitOnly = false,
 }: UseCheckoutDiffQueryOptions) {
   const retainedPanelActive = useRetainedPanelActive();
   const queryEnabled = enabled && retainedPanelActive;
@@ -71,7 +73,7 @@ export function useCheckoutDiffQuery({
     return normalizedScope ? [...comparisonKey, "scope", normalizedScope] : comparisonKey;
   }, [serverId, cwd, compareMode, compareBaseRef, compareIgnoreWhitespace, queryScope]);
   const subscriptionId = useMemo(() => `checkoutDiff:${JSON.stringify(queryKey)}`, [queryKey]);
-  const routeEnabled = Boolean(queryEnabled && isConnected && cwd);
+  const routeEnabled = Boolean(queryEnabled && isConnected && cwd && !explicitOnly);
 
   const query = useReplicaQuery<CheckoutDiffQueryPayload>({
     queryKey,
@@ -91,7 +93,10 @@ export function useCheckoutDiffQuery({
     }),
   });
 
-  return deriveCheckoutDiffResult(query.data ?? null);
+  return {
+    ...deriveCheckoutDiffResult(query.data ?? null),
+    needsRefresh: explicitOnly && !query.data,
+  };
 }
 
 export interface CheckoutDiffResult {

@@ -2,7 +2,7 @@
 
 ## Project identity
 
-Projects are allocated for the exact root selected by the caller, normalized lexically with `path.resolve` (never `realpath`). New project IDs are opaque `prj_<16 hex>` values. Existing remote-shaped or path-shaped IDs are retained as readable compatibility records and are never rekeyed. An active exact root is idempotent; archived-only matches do not resurrect an old project. Workspace `projectId` is stable membership: reconciliation may update git-derived kind and branch metadata, but never rehomes a workspace or changes a project's root, ID, or default name.
+Projects are allocated for the exact root selected by the caller, normalized lexically with `path.resolve` (never `realpath`). New project IDs are opaque `prj_<16 hex>` values. Existing remote-shaped or path-shaped IDs are retained as readable compatibility records and are never rekeyed. An active exact root is idempotent; archived-only matches do not resurrect an old project. Workspace `projectId` is stable membership: reconciliation may update git-derived kind and branch metadata, but never rehomes a workspace or changes a project's root, ID, or default name. It only ever updates them from a Git read it actually performed; see [Automatic Git activity](#automatic-git-activity).
 
 `projectKey` is a persisted, opaque equivalence key used only to group the same logical project
 across hosts. It is separate from the host-local `projectId`; today's producer prefers a normalized
@@ -12,9 +12,12 @@ older records where the field is absent—there is no migration.
 
 `kind` and `projectKey` are mutable metadata, not identity. Workspace reconciliation watches active project roots and
 updates those fields and `updatedAt` when Git facts change, preserving the project's ID, root path,
-names, and workspace foreign keys. Attached workspaces are independently refreshed
-from their own cwd, so an explicit project root never implies a workspace checkout. Empty projects
-are observed too.
+names, and workspace foreign keys. It only does so for a path whose effective Git activity mode is
+automatic: a path the host policy withholds is skipped, and a skipped read is a distinct outcome
+from a non-Git one, so absent Git metadata is never recorded as `non_git`. Attached workspaces are
+independently refreshed from their own cwd, so an explicit project root never implies a workspace
+checkout, and one sibling being withheld does not stop the others being read. Empty projects are
+observed too.
 
 The workspace registry model defines placement once: initial directory/worktree construction,
 mutable reconciliation fields, and the persisted-to-wire checkout projection. Its update policy
@@ -25,7 +28,10 @@ placement authority: `cwd` is the exact execution directory, while `worktreeRoot
 checkout root. They intentionally differ for an exact subproject inside a worktree. Archive,
 restore, branch auto-name, and descriptor flows consume those persisted facts rather than
 rediscovering ownership from a directory that may already be gone. Reconciliation may refresh
-mutable placement facts, but never changes `projectId`, `cwd`, `displayName`, or `baseBranch`.
+mutable placement facts (`kind`, `worktreeRoot`, `mainRepoRoot`, `isPaseoOwnedWorktree`) from a Git
+read it performed, but never changes `projectId`, `cwd`, `displayName`, or `baseBranch`. A workspace
+whose read was skipped keeps its persisted placement untouched, because guessing placement from a
+skipped read is what collapses a worktree into a directory.
 Workspace archive runs lifecycle teardown from the exact `cwd` but removes only the backing
 `worktreeRoot` after its last active reference disappears. Worktree recovery recreates that backing
 checkout from `mainRepoRoot`, then restores the relative path from `worktreeRoot` to `cwd`.
@@ -353,6 +359,65 @@ Environment variables override `config.json`:
 after changing `config.json`. Environment changes require a daemon restart; the launch environment
 remains authoritative during reload.
 
+### Automatic Git activity
+
+`daemon.git.policy` is one host-global setting with three values. There is no per-project,
+per-workspace or environment override, and no separate switch for fetch versus watch:
+
+```json
+{ "daemon": { "git": { "policy": "auto" } } }
+```
+
+| Value     | Meaning                                                                                         |
+| --------- | ----------------------------------------------------------------------------------------------- |
+| `auto`    | Default. Classify each workspace's storage; only a verified-local workspace gets automatic Git. |
+| `manual`  | No automatic Git anywhere. Explicit user actions still read Git. Never inspects storage.        |
+| `enabled` | Automatic Git everywhere, skipping classification. Process limits above still apply.            |
+
+The wire field is optional everywhere and `auto` is applied in the config resolver, never by a
+schema default, so an old client's patch cannot erase it. A policy-only patch preserves the
+process limits above; never send a partial `git` object expecting the rest to be inferred.
+
+Under `auto` the daemon classifies storage from its own `/proc/self/mountinfo` alone: it resolves
+the longest matching mount point for the workspace and refuses known network FUSE types, so no
+workspace read is ever needed to decide. The classification assumes the Git metadata a workspace
+reads lives on the same mount as the workspace itself — a `.git` symlinked or `gitdir:`-linked
+onto another mount is not detected, and [file-observation.md](./file-observation.md) explains why
+that trade is deliberate. A workspace whose verdict has not arrived yet — or has aged past the
+60-second cache TTL — reads `unknown`, which behaves exactly like `manual`. Stale permission is
+never granted. Because classification is asynchronous, a workspace is normally refused on first
+sight and then converges; see
+[file-observation.md](./file-observation.md) for what that costs and why.
+
+This setting reduces Paseo's own automatic Git work. It does not make the daemon universally
+safe on a stalled FUSE mount, and it never disables the Git that a user action needs: adding or
+creating a workspace, checkout, commit, pull and push still run their required validation.
+
+#### Behavior for existing clients
+
+No client change is required, and none is offered. The daemon enforces the policy for every
+connected client, old and new:
+
+- **Automatic status and diff subscription requests are suppressed.** On a manual or `unknown`
+  workspace they return the existing parseable `NOT_ALLOWED` envelope (with `refreshState:
+"paused"`). A cached snapshot is served and marked paused when one exists. Repeated requests —
+  including reconnect storms — perform zero Git and zero forge work; the forge resolution in the
+  error fallback is gated too, since it is itself I/O.
+- **`checkout_pr_status_request` is suppressed the same way.** It carries no explicit user intent,
+  so it is refused before either the snapshot read or the forge fallback.
+- **Explicit `checkout.refresh.request` keeps working.** It runs Git, returns the snapshot on the
+  response, and publishes the status update directly, because a manual workspace has no observer
+  to do it.
+
+Known limitations, documented rather than fixed:
+
+- Old clients show the generic paused error message. There is no new paused-specific label or
+  explicit-diff UX for them, and none is planned in this scope.
+- Manual mode serves a **cached** diff when one exists for the exact `cwd` and `compare`. A
+  request with no exactly matching cache gets the paused payload, never another comparison's
+  files. The cached diff can be stale: it is whatever the last successful read produced, and no
+  background refresh updates it while paused.
+
 `agents.metadataGeneration.providers` controls the preferred structured-generation fallback order for daemon-side metadata tasks such as commit messages, PR text, branch names, and generated agent titles. Entries are tried first in the configured order, then Paseo falls through to dynamically discovered defaults and finally the current selection when available.
 
 Local speech model ids are intentionally narrow: STT uses `parakeet-tdt-0.6b-v2-int8`, TTS uses `kokoro-en-v0_19`, and turn detection uses the bundled Silero VAD model.
@@ -503,6 +568,22 @@ Array of workspace records. A workspace is a specific working directory within a
 | `labels`                       | `string[]?`                                                  | Normalized display names assigned from this host's shared label catalog. Missing means unlabelled.                                                                                            |
 | `pinnedAt`                     | `string \| null` (ISO 8601)                                  | Pinned-to-top-of-sidebar timestamp; null means "not pinned"                                                                                                                                   |
 | `untrustedSource`              | `{ kind: "change_request", forge, number, headRepository }?` | Provenance captured when a cross-repository change request creates the workspace. Missing means repository automation is allowed; explicit setup removes the field.                           |
+
+### Wire-only: `gitActivity`
+
+The workspace projection carries an optional `gitActivity` object that is **not** a persisted
+registry field — the daemon derives it from its own policy state on every projection, so it exists
+even when no Git snapshot was ever taken.
+
+| Field              | Type                                   | Notes                                                                             |
+| ------------------ | -------------------------------------- | --------------------------------------------------------------------------------- |
+| `configuredPolicy` | `"auto" \| "manual" \| "enabled"`      | The host setting. Never derived from a workspace.                                 |
+| `effectiveMode`    | `"automatic" \| "manual" \| "unknown"` | Only `automatic` permits background Git. `unknown` behaves exactly like `manual`. |
+| `reason`           | `string?`                              | Open on the wire; fall back to `effectiveMode`, never match on the string.        |
+| `lastCheckedAt`    | `string \| null` (ISO 8601)            | Last completed classification; null when never checked.                           |
+
+Consumers must treat a missing or `unknown` `effectiveMode` as "explicit actions only", and must
+never render unavailable Git state as clean or non-Git. `gitRuntime` may be null independently.
 
 > **Opaque-ID invariant:** `workspaceId` is opaque identity, never a filesystem path. Filesystem and git operations take `cwd`/`workspaceDirectory` only — never the id. A compatibility-only first-materialization bootstrap still groups pre-registry agent records by path and Git remote so existing installs retain their legacy records. That grouping never runs against a live registry, and its keys are not runtime project or workspace identity.
 

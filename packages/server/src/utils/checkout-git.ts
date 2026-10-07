@@ -1,7 +1,6 @@
 import { resolve, dirname, basename } from "path";
-import { existsSync, realpathSync } from "fs";
-import { open as openFile, readFile, stat as statFile } from "fs/promises";
 import { setImmediate } from "node:timers/promises";
+import { open as openFile, readFile, realpath, stat as statFile } from "fs/promises";
 import { TTLCache } from "@isaacs/ttlcache";
 import type { CheckoutCommit, CheckoutCommitFile } from "@getpaseo/protocol/messages";
 import { parseGitHubRemoteIdentity, parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
@@ -933,6 +932,20 @@ function getRunGitCommand(context?: CheckoutContext): RunGitCommand {
   return context?.runGitCommand ?? runGitCommand;
 }
 
+/**
+ * Existence check that never blocks the event loop: ENOENT is the expected
+ * answer for the git-dir files this is used with, and the same answer arrives
+ * from the libuv pool when the workspace itself is slow.
+ */
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await statFile(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function requireGitRepo(cwd: string, context?: CheckoutContext): Promise<void> {
   try {
     await getRunGitCommand(context)(["rev-parse", "--git-dir"], {
@@ -1071,7 +1084,7 @@ async function getMainRepoRootFromCommonDir(
   if (!commonDir) {
     throw new Error("Not in a git repository");
   }
-  const normalized = realpathSync(commonDir);
+  const normalized = await realpath(commonDir);
 
   if (basename(normalized) === ".git") {
     return dirname(normalized);
@@ -1513,7 +1526,7 @@ async function abortGitPullConflictState(cwd: string): Promise<void> {
   const rebaseMergePath = resolve(gitDir, "rebase-merge");
   const rebaseApplyPath = resolve(gitDir, "rebase-apply");
 
-  if (existsSync(mergeHeadPath)) {
+  if (await pathExists(mergeHeadPath)) {
     try {
       await runGitCommand(["merge", "--abort"], { cwd, timeout: 120_000 });
     } catch {
@@ -1521,7 +1534,7 @@ async function abortGitPullConflictState(cwd: string): Promise<void> {
     }
   }
 
-  if (existsSync(rebaseMergePath) || existsSync(rebaseApplyPath)) {
+  if ((await pathExists(rebaseMergePath)) || (await pathExists(rebaseApplyPath))) {
     try {
       await runGitCommand(["rebase", "--abort"], { cwd, timeout: 120_000 });
     } catch {

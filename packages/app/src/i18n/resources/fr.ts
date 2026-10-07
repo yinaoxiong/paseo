@@ -971,6 +971,10 @@ export const fr: TranslationResources = {
         uncommitted: "Non commité",
         committed: "Commité",
         branchUnknown: "Inconnue",
+        manualRefreshHostUpdate:
+          "Mettez à jour l’hôte pour actualiser les modifications Git en mode manuel.",
+        manualRefreshRequired:
+          "Les mises à jour automatiques de Git sont suspendues. Actualisez pour lire ces différences.",
         base: "base",
         newFile: "Nouveau",
         deletedFile: "Supprimé",

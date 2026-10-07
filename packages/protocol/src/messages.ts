@@ -170,6 +170,25 @@ const MutableRelayConfigSchema = z
   })
   .passthrough();
 
+// Host-global automatic Git activity policy. One setting per daemon host; there
+// is no project-level or environment-level override.
+//   auto    — decide per workspace from its storage; only verified-local workspaces
+//             get automatic Git observation.
+//   manual  — never observe automatically; explicit user actions only.
+//   enabled — always allow automatic Git observation, skipping storage detection.
+// The wire field stays optional: the default is applied by
+// `normalizeGitActivityPolicy` in the config resolver, never by a zod
+// `.default()`, so an absent value remains parseable as "old daemon, no policy".
+export const GitActivityPolicySchema = z.enum(["auto", "manual", "enabled"]);
+export type GitActivityPolicy = z.infer<typeof GitActivityPolicySchema>;
+
+export const DEFAULT_GIT_ACTIVITY_POLICY: GitActivityPolicy = "auto";
+
+export function normalizeGitActivityPolicy(value: unknown): GitActivityPolicy {
+  const parsed = GitActivityPolicySchema.safeParse(value);
+  return parsed.success ? parsed.data : DEFAULT_GIT_ACTIVITY_POLICY;
+}
+
 export const MutableDaemonConfigSchema = z
   .object({
     // COMPAT(relayConfig): added in v0.2.6, remove after 2027-01-31 when old daemons are unsupported.
@@ -192,6 +211,9 @@ export const MutableDaemonConfigSchema = z
       .object({
         maxProcessesPerSecond: z.number().int().positive(),
         maxProcessConcurrency: z.number().int().positive(),
+        // COMPAT(gitActivityPolicy): added in v0.7.2, remove optional parsing
+        // after 2027-09-24. Optional on the wire; absent means `auto`.
+        policy: GitActivityPolicySchema.optional(),
       })
       .optional(),
     app: z.object({ baseUrl: z.string() }).optional(),
@@ -215,6 +237,14 @@ export const MutableDaemonConfigPatchSchema = z
     relay: MutableRelayConfigSchema.partial().optional(),
     mcp: z.object({ injectIntoAgents: z.boolean().optional() }).passthrough().optional(),
     browserTools: MutableBrowserToolsConfigSchema.partial().optional(),
+    // COMPAT(gitActivityPolicy): added in v0.7.2, remove after 2027-09-24. Only
+    // `policy` is patchable; the Git process limits stay launch/config-file owned.
+    git: z
+      .object({
+        policy: GitActivityPolicySchema.optional(),
+      })
+      .passthrough()
+      .optional(),
     providers: z
       .record(z.string(), MutableDaemonProviderConfigSchema.partial().passthrough())
       .optional(),
@@ -3560,6 +3590,14 @@ export const ServerInfoStatusPayloadSchema = z
         providersSnapshotCwd: z.boolean().optional(),
         // COMPAT(directorySync): added in v0.3.x, remove gate after 2027-02-12.
         directorySync: z.boolean().optional(),
+        // COMPAT(gitActivityPolicy): added in v0.7.2, remove gate after 2027-09-24.
+        // The daemon owns a host-global Git activity policy and reports per-workspace
+        // effective mode. A missing flag means the host predates the policy: clients
+        // must not present the new selector or claim its protection.
+        gitActivityPolicy: z.boolean().optional(),
+        // COMPAT(gitManualRefresh): added in v0.9.2+personal.2, remove after
+        // 2027-09-26 once all private hosts support uncached explicit diff reads.
+        gitManualRefresh: z.boolean().optional(),
         // COMPAT(workspaceLabels): added in v0.5.0, remove after 2027-08-14.
         workspaceLabels: z.boolean().optional(),
         // COMPAT(workspaceSetupRun): added in v0.8.0, remove gate after 2027-09-02.
@@ -3922,6 +3960,42 @@ export const WorkspaceScriptPayloadSchema = z.object({
   terminalId: z.string().nullable().optional().default(null),
 });
 
+// How the host-global Git activity policy resolves for one workspace.
+//
+// `automatic` — automatic Git observation is allowed here.
+// `manual`    — only explicitly requested Git work runs; nothing is observed.
+// `unknown`   — the workspace is not classified (detection pending, timed out, or
+//               unsupported platform). Clients treat it as manual and must never
+//               render it as clean or non-Git.
+export const GitActivityEffectiveModeSchema = z.enum(["automatic", "manual", "unknown"]);
+export type GitActivityEffectiveMode = z.infer<typeof GitActivityEffectiveModeSchema>;
+
+/**
+ * Why a workspace resolved to its effective mode. Open on the wire so a newer
+ * daemon can add reasons without making older clients drop the whole projection;
+ * consumers fall back to `effectiveMode` for unknown values.
+ */
+export const GIT_ACTIVITY_REASONS = [
+  "policy_manual",
+  "policy_enabled",
+  "storage_local",
+  "storage_network",
+  "storage_unknown",
+  "classification_pending",
+  "classification_unsupported",
+] as const;
+export type GitActivityReason = (typeof GIT_ACTIVITY_REASONS)[number] | (string & {});
+
+const WorkspaceGitActivityPayloadSchema = z
+  .object({
+    configuredPolicy: GitActivityPolicySchema,
+    effectiveMode: GitActivityEffectiveModeSchema,
+    reason: z.string().optional(),
+    // Timestamp of the last completed classification; null when never checked.
+    lastCheckedAt: z.string().nullable(),
+  })
+  .optional();
+
 const WorkspaceGitRuntimePayloadSchema = z
   .object({
     currentBranch: z.string().nullable().optional(),
@@ -4039,6 +4113,10 @@ export const WorkspaceDescriptorPayloadSchema = z
       .optional(),
     scripts: z.array(WorkspaceScriptPayloadSchema).default([]),
     gitRuntime: WorkspaceGitRuntimePayloadSchema,
+    // COMPAT(gitActivityPolicy): added in v0.7.2, remove optional parsing after
+    // 2027-09-24. Host policy state for this workspace, built without any Git
+    // query. Absent on old daemons; clients must not infer a mode from it.
+    gitActivity: WorkspaceGitActivityPayloadSchema,
     // COMPAT(githubRuntimeName): legacy wire-field name now carries
     // forge-neutral runtime data. Introduce and migrate to a neutral
     // forgeRuntime field before consumers stop using this name. Target cleanup
@@ -5171,10 +5249,25 @@ const AheadBehindSchema = z.object({
   behind: z.number(),
 });
 
+// Freshness of the snapshot a status payload carries.
+//   fresh  — produced by work that just completed.
+//   stale  — a cached snapshot from earlier automatic observation.
+//   paused — automatic observation is off for this workspace; the payload may be
+//            a cached snapshot or a placeholder, never a live read.
+//   unknown — no information about freshness.
+// COMPAT(gitActivityPolicy): added in v0.7.2, remove optional parsing after 2027-09-24.
+// Optional so every existing status payload stays parseable.
+const CheckoutRefreshStateSchema = z.enum(["fresh", "stale", "paused", "unknown"]);
+
 const CheckoutStatusCommonSchema = z.object({
   cwd: z.string(),
   error: CheckoutErrorSchema.nullable(),
   requestId: z.string(),
+  // COMPAT(gitActivityPolicy): added in v0.7.2, remove optional parsing after
+  // 2027-09-24. Clients handle `error` and `refreshState` before consuming
+  // `isGit`: a `paused` payload is "not queried", never "clean" or "non-Git".
+  refreshState: CheckoutRefreshStateSchema.optional(),
+  lastRefreshedAt: z.string().nullable().optional(),
   // The full ref currentBranch tracks, as git resolves `<branch>@{upstream}`:
   // "refs/remotes/origin/main", "refs/remotes/upstream/main" on a fork, or a
   // "refs/heads/..." ref for a branch tracking a local branch. Null when there is no
@@ -5228,13 +5321,17 @@ const CheckoutStatusGitPaseoSchema = CheckoutStatusCommonSchema.extend({
   remoteUrl: z.string().nullable(),
 });
 
+// The status snapshot itself, shared by the status response, the status update
+// and the optional `status` field of an explicit refresh response.
+const CheckoutStatusSnapshotSchema = z.union([
+  CheckoutStatusNotGitSchema,
+  CheckoutStatusGitNonPaseoSchema,
+  CheckoutStatusGitPaseoSchema,
+]);
+
 export const CheckoutStatusResponseSchema = z.object({
   type: z.literal("checkout_status_response"),
-  payload: z.union([
-    CheckoutStatusNotGitSchema,
-    CheckoutStatusGitNonPaseoSchema,
-    CheckoutStatusGitPaseoSchema,
-  ]),
+  payload: CheckoutStatusSnapshotSchema,
 });
 
 const CheckoutPrGithubAutoMergeRequestSchema = z
@@ -5464,6 +5561,11 @@ export const CheckoutRefreshResponseSchema = z.object({
     success: z.boolean(),
     error: CheckoutErrorSchema.nullable(),
     requestId: z.string(),
+    // COMPAT(gitActivityPolicy): added in v0.7.2, remove optional parsing after
+    // 2027-09-24. The real snapshot the refresh produced. Manual mode has no live
+    // observer to publish it, so the response carries it instead of making the
+    // client re-issue a status request that manual mode would refuse to serve.
+    status: CheckoutStatusSnapshotSchema.optional(),
   }),
 });
 
@@ -7064,6 +7166,7 @@ export type ProjectCheckoutLitePayload = z.infer<typeof ProjectCheckoutLitePaylo
 export type ProjectPlacementPayload = z.infer<typeof ProjectPlacementPayloadSchema>;
 export type WorkspaceStateBucket = z.infer<typeof WorkspaceStateBucketSchema>;
 export type WorkspaceDescriptorPayload = z.infer<typeof WorkspaceDescriptorPayloadSchema>;
+export type WorkspaceGitActivityPayload = z.infer<typeof WorkspaceGitActivityPayloadSchema>;
 export type WorkspaceProjectDescriptorPayload = z.infer<
   typeof WorkspaceProjectDescriptorPayloadSchema
 >;
@@ -7316,6 +7419,7 @@ export type CheckoutPushRequest = z.infer<typeof CheckoutPushRequestSchema>;
 export type CheckoutPushResponse = z.infer<typeof CheckoutPushResponseSchema>;
 export type CheckoutRefreshRequest = z.infer<typeof CheckoutRefreshRequestSchema>;
 export type CheckoutRefreshResponse = z.infer<typeof CheckoutRefreshResponseSchema>;
+export type CheckoutRefreshState = z.infer<typeof CheckoutRefreshStateSchema>;
 export type CheckoutDiscardChangesRequest = z.infer<typeof CheckoutDiscardChangesRequestSchema>;
 export type CheckoutDiscardChangesResponse = z.infer<typeof CheckoutDiscardChangesResponseSchema>;
 export type CheckoutCommitFile = z.infer<typeof CheckoutCommitFileSchema>;

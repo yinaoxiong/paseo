@@ -201,6 +201,7 @@ import {
   createGitMutationService,
   type GitMutationService,
 } from "./session/git-mutation/git-mutation-service.js";
+import type { GitActivityPolicyService } from "./git-activity/policy.js";
 import {
   createWorkspaceProvisioningService,
   type WorkspaceProvisioningService,
@@ -474,6 +475,12 @@ export interface SessionOptions {
   // defaults to the real checkout-git implementation.
   renameCurrentBranch?: typeof renameCurrentBranchDefault;
   workspaceGitService: WorkspaceGitService;
+  /**
+   * Host-global Git activity admission. Optional so existing test constructs keep
+   * working; the daemon always supplies one, and it must be supplied wherever
+   * automatic Git sources are exercised.
+   */
+  gitActivity?: GitActivityPolicyService;
   workspaceAutoName: WorkspaceAutoName;
   daemonConfigStore: DaemonConfigStore;
   pluginRuntime?: {
@@ -729,6 +736,7 @@ export class Session {
   private readonly github: ForgeService;
   private readonly renameCurrentBranch: typeof renameCurrentBranchDefault;
   private readonly workspaceGitService: WorkspaceGitService;
+  private readonly gitActivity: GitActivityPolicyService | undefined;
   private readonly workspaceAutoName: WorkspaceAutoName;
   private readonly gitMutation: GitMutationService;
   private readonly workspaceProvisioning: WorkspaceProvisioningService;
@@ -902,9 +910,11 @@ export class Session {
     this.github = github ?? createGitHubService();
     this.renameCurrentBranch = renameCurrentBranch ?? renameCurrentBranchDefault;
     this.workspaceGitService = workspaceGitService;
+    this.gitActivity = options.gitActivity;
     this.gitMutation = createGitMutationService({
       workspaceGitService: this.workspaceGitService,
       logger: this.sessionLogger,
+      gitActivity: this.gitActivity,
     });
     this.workspaceAutoName = workspaceAutoName;
     this.workspaceProvisioning = createWorkspaceProvisioningService({
@@ -950,12 +960,20 @@ export class Session {
       paseoHome: this.paseoHome,
       worktreesRoot: this.worktreesRoot,
       logger: this.sessionLogger,
+      gitActivity: options.gitActivity,
+    });
+    // A self-driven mode change -- an `auto` classification landing, not a host
+    // policy edit -- has no other trigger. Without this the projection keeps
+    // reporting "undetermined" for a workspace the daemon has since verified.
+    this.workspaceGitService.onGitActivityStateChanged((cwd) => {
+      void this.emitWorkspaceUpdateForCwd(cwd).catch(() => undefined);
     });
     this.workspaceGitObserver = createWorkspaceGitObserverService({
       workspaceGitService: this.workspaceGitService,
       emitWorkspaceUpdateForCwd: (cwd) => this.emitWorkspaceUpdateForCwd(cwd),
       emitStatusUpdate: (cwd, snapshot) => this.checkoutSession.emitStatusUpdate(cwd, snapshot),
       onBranchChanged,
+      gitActivity: this.gitActivity,
       logger: this.sessionLogger,
     });
     this.scheduleSession = new ScheduleSession({
@@ -5512,12 +5530,34 @@ export class Session {
     }
   }
 
+  /**
+   * The per-workspace policy projection. Built from cached policy state only —
+   * never from a Git query — so a capable daemon can always answer it, including
+   * when no snapshot exists.
+   */
+  private buildWorkspaceGitActivityPayload(
+    cwd: string,
+  ): NonNullable<WorkspaceDescriptorPayload["gitActivity"]> | null {
+    if (!this.gitActivity) {
+      return null;
+    }
+    const state = this.gitActivity.peek(cwd);
+    return {
+      configuredPolicy: state.configuredPolicy,
+      effectiveMode: state.effectiveMode,
+      ...(state.reason === undefined ? {} : { reason: state.reason }),
+      lastCheckedAt: state.lastCheckedAt,
+    };
+  }
+
   private async describeWorkspaceRecord(
     workspace: PersistedWorkspaceRecord,
     projectRecord?: PersistedProjectRecord | null,
   ): Promise<WorkspaceDescriptorPayload> {
     const resolvedProjectRecord =
       projectRecord ?? (await this.projectRegistry.get(workspace.projectId));
+
+    const gitActivity = this.buildWorkspaceGitActivityPayload(workspace.cwd);
 
     let diffStat: { additions: number; deletions: number } | null = null;
     const snapshot = this.workspaceGitService.peekSnapshot(workspace.cwd);
@@ -5552,6 +5592,7 @@ export class Session {
       statusEnteredAt: null,
       activityAt: null,
       diffStat,
+      ...(gitActivity ? { gitActivity } : {}),
       scripts: this.buildWorkspaceScriptPayloadSnapshot(workspace, resolvedProjectRecord),
       ...(resolvedProjectRecord
         ? {
@@ -5665,7 +5706,11 @@ export class Session {
     projectRecord?: PersistedProjectRecord | null;
     includeGitData: boolean;
   }): Promise<WorkspaceDescriptorPayload> {
-    if (input.includeGitData && input.workspace.kind !== "directory") {
+    // Implicit enrichment is automatic Git work: a projection that happens to
+    // ask for Git data must not read it on a manual workspace. Explicit user
+    // actions still reach Git through their own handlers.
+    const gitDataAllowed = !this.gitActivity || this.gitActivity.isAutomatic(input.workspace.cwd);
+    if (input.includeGitData && gitDataAllowed && input.workspace.kind !== "directory") {
       return this.describeWorkspaceRecordWithGitData(input.workspace, input.projectRecord);
     }
     return this.describeWorkspaceRecord(input.workspace, input.projectRecord);

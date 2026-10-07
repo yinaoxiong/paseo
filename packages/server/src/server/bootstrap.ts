@@ -175,12 +175,15 @@ import type { PushNotificationSender } from "./push/index.js";
 import { getOrCreateServerId } from "./server-id.js";
 import { resolveDaemonVersion } from "./daemon-version.js";
 import type { AgentClient, AgentProvider } from "./agent/agent-sdk-types.js";
-import type {
-  AgentProfile,
-  AgentSkillSelection,
-  FirstAgentContext,
-  PluginSource,
-  TerminalProfile,
+import {
+  DEFAULT_GIT_ACTIVITY_POLICY,
+  normalizeGitActivityPolicy,
+  type AgentProfile,
+  type AgentSkillSelection,
+  type FirstAgentContext,
+  type GitActivityPolicy,
+  type PluginSource,
+  type TerminalProfile,
 } from "@getpaseo/protocol/messages";
 import type {
   AgentProviderRuntimeSettingsMap,
@@ -215,6 +218,8 @@ import { createGitMutationService } from "./session/git-mutation/git-mutation-se
 import { workspaceIdsOnCheckout } from "./workspace-directory.js";
 import { configureGitProcessPolicy } from "../utils/run-git-command.js";
 import { resolveGitProcessPolicy } from "../utils/git-process-scheduler.js";
+import { createFilesystemClassifier } from "./git-activity/filesystem.js";
+import { createGitActivityPolicyService } from "./git-activity/policy.js";
 import { resolveFirstAgentPromptTitle } from "./agent/create-agent-title.js";
 import {
   createAgentCommand,
@@ -404,6 +409,12 @@ export interface PaseoDaemonConfig {
   git?: {
     maxProcessesPerSecond: number;
     maxProcessConcurrency: number;
+    /**
+     * Host-global Git activity policy. Optional on the wire and in config:
+     * the `auto` default is applied by `normalizeGitActivityPolicy`, never by
+     * a zod default, so an absent value stays parseable as an old config.
+     */
+    policy?: GitActivityPolicy;
   };
   autoArchiveAfterMerge?: boolean;
   enableTerminalAgentHooks?: boolean;
@@ -537,6 +548,20 @@ function resolveExpressTrustProxySetting(config: PaseoDaemonConfig): true | stri
   return config.trustedProxies ?? ["loopback"];
 }
 
+/**
+ * The Git slice of the mutable projection: launch process limits plus the
+ * host-global policy. Kept out of `createInitialMutableDaemonConfig` so that
+ * function stays under the complexity limit.
+ */
+function resolveMutableGitConfig(
+  config: PaseoDaemonConfig,
+): NonNullable<MutableDaemonConfig["git"]> {
+  return {
+    ...(config.git ?? resolveGitProcessPolicy({ env: process.env })),
+    policy: normalizeGitActivityPolicy(config.git?.policy),
+  };
+}
+
 function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDaemonConfig {
   const providers = config.providerOverrides ?? {};
 
@@ -549,7 +574,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     ...(config.hostnames !== undefined ? { hostnames: config.hostnames } : {}),
     cors: { allowedOrigins: config.corsAllowedOrigins },
     trustedProxies: config.trustedProxies ?? ["loopback"],
-    git: config.git ?? resolveGitProcessPolicy({ env: process.env }),
+    git: resolveMutableGitConfig(config),
     app: { baseUrl: config.appBaseUrl ?? "https://app.paseo.sh" },
     ...(config.providerCatalogRefreshTimeoutMs !== undefined
       ? { catalogRefreshTimeoutMs: config.providerCatalogRefreshTimeoutMs }
@@ -892,10 +917,19 @@ export async function createPaseoDaemon(
     workspaceRegistry,
   });
   const github = createGitHubService();
+  // One host-global policy owner. Every automatic Git source asks it instead of
+  // probing the filesystem itself, so a workspace on a stalled mount is decided
+  // once and shared.
+  const gitActivity = createGitActivityPolicyService({
+    classifier: createFilesystemClassifier({ logger }),
+    logger,
+    getPolicy: () => daemonConfigStore.get().git?.policy ?? DEFAULT_GIT_ACTIVITY_POLICY,
+  });
   const workspaceGitService = new WorkspaceGitServiceImpl({
     logger,
     paseoHome: config.paseoHome,
     worktreesRoot: config.worktreesRoot,
+    gitActivity,
     deps: {
       forgeOverrides: { github },
     },
@@ -940,6 +974,20 @@ export async function createPaseoDaemon(
   daemonConfigStore.onFieldChange("git.maxProcessConcurrency", () => {
     const git = daemonConfigStore.get().git;
     if (git) configureGitProcessPolicy(git);
+  });
+  // A policy change closes admission synchronously, then tears down. Saving the
+  // setting must not wait on a filesystem teardown that may never finish.
+  daemonConfigStore.onApply(() => {
+    gitActivity.refreshPolicy();
+    const { stopped, restarted } = workspaceGitService.applyGitActivityPolicy();
+    logger.info(
+      { stoppedCount: stopped.length, restartedCount: restarted.length },
+      "Git activity policy applied",
+    );
+    return () => {
+      gitActivity.refreshPolicy();
+      workspaceGitService.applyGitActivityPolicy();
+    };
   });
   const initialAgentManagerState = providerSnapshotManager.getAgentManagerProviderState();
   const agentManager = new AgentManager({
@@ -992,6 +1040,7 @@ export async function createPaseoDaemon(
     workspaceRegistry,
     logger,
     workspaceGitService,
+    gitActivity,
     onProjectUpdate: (update) => wsServer?.publishProjectUpdate(update),
     onWorkspaceArchived: teardownArchivedWorkspaceRuntime,
     onWorkspacesChanged: async (workspaceIds) => {
@@ -1010,6 +1059,7 @@ export async function createPaseoDaemon(
     logger,
     paseoHome: config.paseoHome,
     workspaceGitService,
+    gitActivity,
   });
   const archiveWorkspaceRecordExternal = async (
     workspaceId: string,
@@ -1102,6 +1152,7 @@ export async function createPaseoDaemon(
     gitMutation: createGitMutationService({
       workspaceGitService,
       logger,
+      gitActivity,
     }),
     emitWorkspaceUpdateForCwd: emitWorkspaceUpdateForCwdExternal,
     emitWorkspaceUpdateForWorkspaceId: async (workspaceId) => {
@@ -1115,6 +1166,7 @@ export async function createPaseoDaemon(
     paseoWorktreesBaseRoot: config.worktreesRoot,
     daemonConfigStore,
     workspaceGitService,
+    gitActivity,
     github,
     agentManager,
     agentStorage,
@@ -1713,6 +1765,7 @@ export async function createPaseoDaemon(
               () => (boundListenTarget?.type === "tcp" ? boundListenTarget.host : null),
               (hostname) => scriptHealthMonitor.getHealthForHostname(hostname),
               workspaceGitService,
+              gitActivity,
               github,
               config.pushNotificationSender,
               providerSnapshotManager,

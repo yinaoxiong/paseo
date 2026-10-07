@@ -956,6 +956,9 @@ export const ru: TranslationResources = {
         refresh: "Обновить",
         refreshState: "Обновить состояние Git и {{brand}}",
         failedRefresh: "Не удалось обновить состояние Git.",
+        manualRefreshHostUpdate: "Обновите хост, чтобы обновлять изменения Git в ручном режиме.",
+        manualRefreshRequired:
+          "Автоматические обновления Git приостановлены. Обновите, чтобы загрузить различия.",
         seeUncommittedChanges: "Показать незафиксированные изменения",
         seeCommittedChanges: "Показать зафиксированные изменения",
         checkingRepository: "Проверяем репозиторий...",

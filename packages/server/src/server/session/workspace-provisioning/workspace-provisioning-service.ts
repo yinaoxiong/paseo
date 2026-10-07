@@ -4,6 +4,7 @@ import { basename, resolve } from "node:path";
 import type { ProjectCheckoutLitePayload } from "@getpaseo/protocol/messages";
 import type { Logger } from "pino";
 import {
+  checkoutLiteFromGitSnapshot,
   generateWorkspaceId,
   initialWorkspacePlacement,
   reconcileWorkspacePlacement,
@@ -100,6 +101,7 @@ export function createWorkspaceProvisioningService(deps: {
   lifecycle?: PluginLifecycle;
 }): WorkspaceProvisioningService {
   const { serverId, workspaceRegistry, projectRegistry, workspaceGitService, logger } = deps;
+  type DirectoryCheckout = Awaited<ReturnType<WorkspaceGitService["getCheckout"]>>;
 
   /**
    * Placement facts at a workspace directory, or null when there is nothing
@@ -189,10 +191,16 @@ export function createWorkspaceProvisioningService(deps: {
     }
   }
 
-  async function findOrCreateProjectForDirectory(cwd: string): Promise<PersistedProjectRecord> {
-    const rootPath = resolve(cwd);
-    const checkout = await workspaceGitService.getCheckout(rootPath);
-    const timestamp = new Date().toISOString();
+  async function resolveDirectoryCheckout(cwd: string): Promise<DirectoryCheckout> {
+    const snapshot = workspaceGitService.peekSnapshot(cwd);
+    if (snapshot) return checkoutLiteFromGitSnapshot(cwd, snapshot.git);
+    return workspaceGitService.getCheckout(cwd);
+  }
+
+  async function upsertProjectForDirectoryCheckout(
+    rootPath: string,
+    checkout: DirectoryCheckout,
+  ): Promise<PersistedProjectRecord> {
     return projectRegistry.getOrCreateActiveByRoot({
       rootPath,
       kind: checkout.isGit ? "git" : "non_git",
@@ -204,8 +212,13 @@ export function createWorkspaceProvisioningService(deps: {
         mainRepoRoot: checkout.mainRepoRoot,
         serverId,
       }),
-      timestamp,
+      timestamp: new Date().toISOString(),
     });
+  }
+
+  async function findOrCreateProjectForDirectory(cwd: string): Promise<PersistedProjectRecord> {
+    const rootPath = resolve(cwd);
+    return upsertProjectForDirectoryCheckout(rootPath, await resolveDirectoryCheckout(rootPath));
   }
 
   async function requireActiveProject(projectId: string): Promise<PersistedProjectRecord> {
@@ -222,11 +235,11 @@ export function createWorkspaceProvisioningService(deps: {
     context?: { expectsInitialAgent?: boolean; workspaceId?: string },
   ): Promise<PersistedWorkspaceRecord> {
     const normalizedCwd = resolve(cwd);
-    const checkout = await workspaceGitService.getCheckout(normalizedCwd);
+    const checkout = await resolveDirectoryCheckout(normalizedCwd);
     const project = projectId
       ? await refreshProjectKind(await requireActiveProject(projectId), normalizedCwd, checkout)
       : // COMPAT(workspaceCreateMissingProjectId): added in v0.1.107, remove after 2027-01-15.
-        await findOrCreateProjectForDirectory(normalizedCwd);
+        await upsertProjectForDirectoryCheckout(normalizedCwd, checkout);
     const timestamp = new Date().toISOString();
     const workspace = createPersistedWorkspaceRecord({
       workspaceId: context?.workspaceId ?? generateWorkspaceId(),

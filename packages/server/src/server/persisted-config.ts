@@ -11,7 +11,9 @@ import {
 import type { AgentProviderRuntimeSettingsMap } from "./agent/provider-launch-config.js";
 import { ensurePrivateFile, writePrivateFileAtomicSync } from "./private-files.js";
 import { AgentProfileSchema, AgentSkillSelectionSchema } from "@getpaseo/protocol/agent-profile";
+import { GitActivityPolicySchema } from "@getpaseo/protocol/messages";
 import { PluginIdSchema, PluginSourceSchema } from "@getpaseo/protocol/plugin-config";
+import { BUILTIN_PROVIDER_IDS } from "@getpaseo/protocol/provider-manifest";
 import { TerminalProfileSchema } from "@getpaseo/protocol/terminal-profile";
 import { PaseoServicePortAllocationSchema } from "@getpaseo/protocol/paseo-config-schema";
 
@@ -174,8 +176,6 @@ const AgentMetadataGenerationSchema = z
   })
   .strict();
 
-const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
-
 function isLegacyProviderEntry(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
@@ -255,6 +255,9 @@ export const PersistedConfigSchema = z
           .object({
             maxProcessesPerSecond: z.number().int().positive().optional(),
             maxProcessConcurrency: z.number().int().positive().optional(),
+            // COMPAT(gitActivityPolicy): added in v0.7.2, remove optional parsing
+            // after 2027-09-24. Host-global only; no project-level or env override.
+            policy: GitActivityPolicySchema.optional(),
           })
           .strict()
           .optional(),

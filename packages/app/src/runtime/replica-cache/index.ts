@@ -3,6 +3,7 @@ import {
   AgentStatusSchema,
   AgentTimelineItemPayloadSchema,
   WorkspaceGitHubRuntimePayloadSchema,
+  WorkspaceDescriptorPayloadSchema,
 } from "@getpaseo/protocol/messages";
 import { AgentProviderSchema } from "@getpaseo/protocol/provider-manifest";
 import type { PluginTimelineData } from "@getpaseo/plugin";
@@ -320,6 +321,7 @@ const StoredWorkspaceSchema = z.strictObject({
   diffStat: z.strictObject({ additions: z.number(), deletions: z.number() }).nullable(),
   scripts: z.array(WorkspaceScriptSchema),
   gitRuntime: WorkspaceGitRuntimeSchema,
+  gitActivity: WorkspaceDescriptorPayloadSchema.in.shape.gitActivity,
   githubRuntime: WorkspaceGitHubRuntimePayloadSchema,
   forge: z.string().optional(),
 });
@@ -719,6 +721,7 @@ function serializeWorkspace(workspace: WorkspaceDescriptor): StoredWorkspace {
       terminalId: script.terminalId,
     })),
     gitRuntime: workspace.gitRuntime,
+    gitActivity: workspace.gitActivity,
     githubRuntime: workspace.githubRuntime,
     forge: workspace.forge,
   };

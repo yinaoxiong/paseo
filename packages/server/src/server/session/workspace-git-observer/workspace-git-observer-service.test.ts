@@ -8,6 +8,12 @@ import type {
   WorkspaceGitService,
 } from "../../workspace-git-service.js";
 import { createWorkspaceGitObserverService } from "./workspace-git-observer-service.js";
+import {
+  createAllowingGitActivityPolicy,
+  createManualGitActivityPolicy,
+} from "../../test-utils/workspace-git-service-stub.js";
+import type { GitActivityPolicyService } from "../../git-activity/policy.js";
+import type { GitActivityEffectiveMode } from "@getpaseo/protocol/messages";
 
 // Watch targets are keyed by resolve(cwd), which is platform-dependent (POSIX vs Windows
 // drive paths). Resolve the test cwds the same way so assertions hold on every platform.
@@ -49,8 +55,11 @@ function flushMicrotasks(): Promise<void> {
   return new Promise((done) => setImmediate(done));
 }
 
-function buildHarness(opts: { emitCwdRejects?: boolean } = {}) {
+function buildHarness(
+  opts: { emitCwdRejects?: boolean; gitActivity?: GitActivityPolicyService } = {},
+) {
   const listeners = new Map<string, WorkspaceGitListener>();
+  const activityStateListeners = new Set<(cwd: string) => void>();
   const registerCalls: string[] = [];
   const unsubscribeCalls: string[] = [];
   const emitCwdCalls: string[] = [];
@@ -58,7 +67,10 @@ function buildHarness(opts: { emitCwdRejects?: boolean } = {}) {
   const branchChanges: Array<[string, string | null, string | null]> = [];
   const warnCalls: unknown[][] = [];
 
-  const workspaceGitService: Pick<WorkspaceGitService, "registerWorkspace"> = {
+  const workspaceGitService: Pick<
+    WorkspaceGitService,
+    "registerWorkspace" | "onGitActivityStateChanged"
+  > = {
     registerWorkspace({ cwd }, listener) {
       registerCalls.push(cwd);
       listeners.set(cwd, listener);
@@ -66,6 +78,14 @@ function buildHarness(opts: { emitCwdRejects?: boolean } = {}) {
         unsubscribe() {
           unsubscribeCalls.push(cwd);
           listeners.delete(cwd);
+        },
+      };
+    },
+    onGitActivityStateChanged: (listener: (cwd: string) => void) => {
+      activityStateListeners.add(listener);
+      return {
+        unsubscribe() {
+          activityStateListeners.delete(listener);
         },
       };
     },
@@ -86,6 +106,7 @@ function buildHarness(opts: { emitCwdRejects?: boolean } = {}) {
       branchChanges.push([workspaceId, oldBranch, newBranch]);
     },
     logger: { warn: (...args: unknown[]) => warnCalls.push(args) } as unknown as pino.Logger,
+    ...(opts.gitActivity ? { gitActivity: opts.gitActivity } : {}),
   });
 
   function emitSnapshot(cwd: string, branch: string | null): void {
@@ -99,6 +120,9 @@ function buildHarness(opts: { emitCwdRejects?: boolean } = {}) {
   return {
     service,
     emitSnapshot,
+    notifyActivityStateChanged: (cwd: string) => {
+      for (const listener of Array.from(activityStateListeners)) listener(cwd);
+    },
     registerCalls,
     unsubscribeCalls,
     emitCwdCalls,
@@ -340,5 +364,103 @@ describe("teardown", () => {
     const descriptor = makeDescriptor({ id: "ws1", workspaceDirectory: WS1, name: "main" });
     h.service.recordDescriptorState("ws1", descriptor);
     expect(h.branchChanges).toEqual([]);
+  });
+});
+describe("git activity admission", () => {
+  test("a manual workspace is never registered for observation", () => {
+    const h = buildHarness({ gitActivity: createManualGitActivityPolicy() });
+    h.service.syncObservers([makeDescriptor({ id: "ws1", workspaceDirectory: WS1 })]);
+
+    // Registering a workspace is what installs watchers, fetch and polls.
+    expect(h.registerCalls).toEqual([]);
+    expect(h.service.getMetrics()).toEqual({
+      watchedDirectoryCount: 0,
+      workspaceRecordCount: 0,
+      subscriptionCount: 0,
+    });
+  });
+
+  test("an admitted workspace is still registered", () => {
+    const h = buildHarness({ gitActivity: createAllowingGitActivityPolicy() });
+    h.service.syncObservers([makeDescriptor({ id: "ws1", workspaceDirectory: WS1 })]);
+    expect(h.registerCalls).toEqual([WS1]);
+  });
+
+  test("a workspace that becomes classified as local is registered without a new client request", async () => {
+    // Under `auto` an unclassified workspace is deliberately refused: `peek`
+    // must not block a request on a filesystem probe.
+    const effectiveMode: { value: GitActivityEffectiveMode } = { value: "unknown" };
+    const policy: GitActivityPolicyService = {
+      isAutomatic: () => effectiveMode.value === "automatic",
+      peek: () => ({
+        configuredPolicy: "auto",
+        effectiveMode: effectiveMode.value,
+        reason: effectiveMode.value === "automatic" ? "storage_local" : "classification_pending",
+        lastCheckedAt: null,
+      }),
+      resolve: async () => ({
+        configuredPolicy: "auto",
+        effectiveMode: effectiveMode.value,
+        reason: "storage_local",
+        lastCheckedAt: null,
+      }),
+      ensureClassification: async (cwd: string) => {
+        // Settle the verdict, the way the real classifier eventually does.
+        effectiveMode.value = "automatic";
+        return { cwd, automatic: true };
+      },
+      refreshPolicy: () => {},
+      invalidate: () => {},
+      invalidateMountTable: () => {},
+      dispose: () => {},
+    };
+    const h = buildHarness({ gitActivity: policy });
+
+    h.service.syncObservers([makeDescriptor({ id: "ws1", workspaceDirectory: WS1 })]);
+    // Refused on first sight: no watchers yet.
+    expect(h.registerCalls).toEqual([]);
+
+    // The classification lands on its own. `fetch_workspaces` is a client
+    // request, not a policy event, so nothing else would ever re-ask.
+    await policy.ensureClassification(WS1);
+    h.notifyActivityStateChanged(WS1);
+
+    expect(h.registerCalls).toEqual([WS1]);
+    expect(h.service.getMetrics().subscriptionCount).toBe(1);
+
+    // Idempotent: a second notification must not register twice.
+    h.notifyActivityStateChanged(WS1);
+    expect(h.registerCalls).toEqual([WS1]);
+  });
+
+  test("switching to manual drops an existing registration", () => {
+    const admitted = { value: true };
+    const policy: GitActivityPolicyService = {
+      isAutomatic: () => admitted.value,
+      peek: () => ({
+        configuredPolicy: "auto",
+        effectiveMode: admitted.value ? "automatic" : "manual",
+        reason: "storage_local",
+        lastCheckedAt: null,
+      }),
+      resolve: async () => ({
+        configuredPolicy: "auto",
+        effectiveMode: admitted.value ? "automatic" : "manual",
+        reason: "storage_local",
+        lastCheckedAt: null,
+      }),
+      refreshPolicy: () => {},
+      invalidate: () => {},
+      invalidateMountTable: () => {},
+      dispose: () => {},
+    };
+    const h = buildHarness({ gitActivity: policy });
+    h.service.syncObservers([makeDescriptor({ id: "ws1", workspaceDirectory: WS1 })]);
+    expect(h.registerCalls).toEqual([WS1]);
+
+    admitted.value = false;
+    h.service.syncObservers([makeDescriptor({ id: "ws1", workspaceDirectory: WS1 })]);
+    expect(h.unsubscribeCalls).toEqual([WS1]);
+    expect(h.service.getMetrics().subscriptionCount).toBe(0);
   });
 });

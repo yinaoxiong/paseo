@@ -4126,6 +4126,68 @@ test("getCheckoutDiff reads a snapshot without creating a subscription", async (
   expect(mock.sent).toHaveLength(1);
 });
 
+test("explicit refresh returns the snapshot the daemon refreshed", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger,
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const promise = client.checkoutRefresh("/tmp/project", "refresh-1");
+
+  expect(mock.sent).toHaveLength(1);
+  const request = parseSentFrame(mock.sent[0]);
+  expect(request.type).toBe("checkout.refresh.request");
+  expect(request.requestId).toBe("refresh-1");
+
+  const status = {
+    cwd: "/tmp/project",
+    error: null,
+    requestId: "refresh-1",
+    isGit: true,
+    isPaseoOwnedWorktree: false,
+    repoRoot: "/tmp/project",
+    currentBranch: "main",
+    isDirty: true,
+    baseRef: "main",
+    aheadBehind: { ahead: 1, behind: 0 },
+    aheadOfOrigin: 1,
+    behindOfOrigin: 0,
+    hasRemote: true,
+    remoteUrl: "git@example.test:org/repo.git",
+    refreshState: "fresh",
+    lastRefreshedAt: "2026-09-24T00:00:00.000Z",
+  };
+
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "checkout.refresh.response",
+      payload: {
+        cwd: "/tmp/project",
+        success: true,
+        error: null,
+        requestId: "refresh-1",
+        status,
+      },
+    }),
+  );
+
+  await expect(promise).resolves.toMatchObject({
+    success: true,
+    status: { refreshState: "fresh", lastRefreshedAt: "2026-09-24T00:00:00.000Z", isGit: true },
+  });
+});
+
 test("requests branch suggestions via RPC", async () => {
   const logger = createMockLogger();
   const mock = createMockTransport();

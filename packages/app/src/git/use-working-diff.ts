@@ -11,6 +11,7 @@ import {
 import { useCheckoutDiffQuery } from "@/git/use-diff-query";
 import { useCheckoutStatusQuery } from "@/git/use-status-query";
 import { useWorkingDiffComparison } from "@/git/working-diff-comparison";
+import { useSessionStore } from "@/stores/session-store";
 
 interface UseWorkingDiffOptions {
   serverId: string;
@@ -37,6 +38,14 @@ export function useWorkingDiff({
   } = useCheckoutStatusQuery({ serverId, cwd });
   const gitStatus = status && status.isGit ? status : null;
   const isGit = Boolean(gitStatus);
+  const explicitOnly = useSessionStore((state) => {
+    const session = state.sessions[serverId];
+    if (session?.serverInfo?.features?.gitActivityPolicy !== true) return false;
+    const workspace = workspaceId
+      ? session.workspaces.get(workspaceId)
+      : [...session.workspaces.values()].find((entry) => entry.workspaceDirectory === cwd);
+    return workspace?.gitActivity?.effectiveMode !== "automatic";
+  });
   const notGit = status !== null && !status.isGit && !status.error;
   const statusErrorMessage =
     status?.error?.message ??
@@ -60,6 +69,7 @@ export function useWorkingDiff({
     payloadError: diffPayloadError,
     diffTooLarge,
     isLoading: isDiffLoading,
+    needsRefresh: diffNeedsRefresh,
   } = useCheckoutDiffQuery({
     serverId,
     cwd,
@@ -68,6 +78,7 @@ export function useWorkingDiff({
     ignoreWhitespace,
     enabled: enabled && isGit,
     queryScope,
+    explicitOnly,
   });
   const reviewDraftKey = useMemo(
     () =>
@@ -105,6 +116,8 @@ export function useWorkingDiff({
     diffPayloadError,
     diffTooLarge,
     isDiffLoading,
+    diffNeedsRefresh,
+    explicitOnly,
     reviewActions,
     reviewAttachment,
   };
