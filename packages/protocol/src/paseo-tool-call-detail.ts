@@ -139,7 +139,7 @@ const TOOL_SPECS: Readonly<Record<string, ToolDetailSpec>> = {
   resume_schedule: { inputOrder: ["id"] },
   delete_schedule: { inputOrder: ["id"] },
   update_schedule: { promptField: "prompt", inputOrder: AUTOMATION_FIELDS },
-  schedule_logs: { inputOrder: ["id"] },
+  schedule_logs: { inputOrder: ["id", "limit", "before", "status", "runId"] },
   run_schedule_once: { inputOrder: ["id"] },
   list_providers: {},
   list_models: { inputOrder: ["provider"] },

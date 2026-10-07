@@ -41,12 +41,18 @@ import type { TerminalManager } from "../../../terminal/terminal-manager.js";
 import type { CreatePaseoWorktreeWorkflowFn } from "../../worktree-session.js";
 import type { ScheduleService } from "../../schedule/service.js";
 import {
-  ScheduleRunSchema,
   ScheduleSummarySchema,
-  StoredScheduleSchema,
   type ScheduleCadence,
   type UpdateScheduleInput,
 } from "@getpaseo/protocol/schedule/types";
+import {
+  SCHEDULE_LOG_DEFAULT_LIMIT,
+  SCHEDULE_LOG_MAX_LIMIT,
+  ScheduleInspectPayloadSchema,
+  ScheduleLogsPayloadSchema,
+  projectScheduleLogs,
+  toScheduleInspectPayload,
+} from "../../schedule/log-projection.js";
 import type { ProviderSnapshotManager } from "../provider-snapshot-manager.js";
 import {
   AgentModelSchema,
@@ -2699,11 +2705,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     "inspect_schedule",
     {
       title: "Inspect schedule",
-      description: "Inspect a schedule and its run history.",
+      description:
+        "Inspect a schedule's definition, run counts, and most recent run preview. Use schedule_logs for history.",
       inputSchema: {
         id: z.string(),
       },
-      outputSchema: StoredScheduleSchema.shape,
+      outputSchema: ScheduleInspectPayloadSchema.shape,
     },
     async ({ id }) => {
       if (!scheduleService) {
@@ -2713,7 +2720,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       const schedule = await requireScheduleTarget(id, "new-agent");
       return {
         content: [],
-        structuredContent: ensureValidJson(schedule),
+        structuredContent: ensureValidJson(toScheduleInspectPayload(schedule)),
       };
     },
   );
@@ -2851,7 +2858,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           clearExpires: z.boolean().optional().describe("Clear any schedule expiry."),
         })
         .passthrough(),
-      outputSchema: StoredScheduleSchema.shape,
+      outputSchema: ScheduleSummarySchema.shape,
     },
     async (input) => {
       if (!scheduleService) {
@@ -2863,7 +2870,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
 
       return {
         content: [],
-        structuredContent: ensureValidJson(schedule),
+        structuredContent: ensureValidJson(toScheduleSummary(schedule)),
       };
     },
   );
@@ -2872,24 +2879,54 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     "schedule_logs",
     {
       title: "Schedule logs",
-      description: "Get the run history (logs) for a schedule.",
+      description:
+        "Return a page of schedule run history, newest first. Defaults to 20 runs with truncated output. Pass runId for one run, status to filter, and before (the previous page's nextBefore) to page older runs.",
       inputSchema: {
         id: z.string(),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .max(SCHEDULE_LOG_MAX_LIMIT)
+          .optional()
+          .default(SCHEDULE_LOG_DEFAULT_LIMIT)
+          .describe("Maximum runs to return. Defaults to 20, maximum 100."),
+        before: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Continue after this run id. Use the previous page's nextBefore."),
+        status: z
+          .enum(["running", "succeeded", "failed"])
+          .optional()
+          .describe("Only include runs with this status."),
+        runId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Return this one run with a larger output cap. Ignores limit, before, and status.",
+          ),
       },
-      outputSchema: {
-        runs: z.array(ScheduleRunSchema),
-      },
+      outputSchema: ScheduleLogsPayloadSchema.shape,
     },
-    async ({ id }) => {
+    async ({ id, limit = SCHEDULE_LOG_DEFAULT_LIMIT, before, status, runId }) => {
       if (!scheduleService) {
         throw new Error("Schedule service is not configured");
       }
 
-      await requireScheduleTarget(id, "new-agent");
-      const runs = await scheduleService.logs(id);
+      const schedule = await requireScheduleTarget(id, "new-agent");
       return {
         content: [],
-        structuredContent: ensureValidJson({ runs }),
+        structuredContent: ensureValidJson(
+          projectScheduleLogs({
+            runs: schedule.runs,
+            limit,
+            ...(before === undefined ? {} : { before }),
+            ...(status === undefined ? {} : { status }),
+            ...(runId === undefined ? {} : { runId }),
+          }),
+        ),
       };
     },
   );
@@ -2900,7 +2937,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       title: "Run schedule once",
       description: "Run a schedule immediately without changing its cron cadence.",
       inputSchema: { id: z.string().min(1) },
-      outputSchema: StoredScheduleSchema.shape,
+      outputSchema: ScheduleSummarySchema.shape,
     },
     async ({ id }) => {
       if (!scheduleService) {
@@ -2910,7 +2947,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       const schedule = await scheduleService.runOnce(id);
       return {
         content: [],
-        structuredContent: ensureValidJson(schedule),
+        structuredContent: ensureValidJson(toScheduleSummary(schedule)),
       };
     },
   );
