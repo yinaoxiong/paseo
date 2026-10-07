@@ -1824,12 +1824,7 @@ function extractContextWindowSize(modelUsage: unknown): number | undefined {
   return maxContextWindow;
 }
 
-function readStreamRequestInputTokens(event: Record<string, unknown>): number | undefined {
-  const messageUsage = toObjectRecord(toObjectRecord(event.message)?.usage);
-  if (!messageUsage) {
-    return undefined;
-  }
-  const usage = messageUsage;
+function readInputTokenTotal(usage: Record<string, unknown>): number | undefined {
   const inputTokens =
     typeof usage.input_tokens === "number" && Number.isFinite(usage.input_tokens)
       ? usage.input_tokens
@@ -1848,6 +1843,27 @@ function readStreamRequestInputTokens(event: Record<string, unknown>): number | 
     return undefined;
   }
   return inputTokens + cacheCreationInputTokens + cacheReadInputTokens;
+}
+
+function readStreamRequestInputTokens(event: Record<string, unknown>): number | undefined {
+  const messageUsage = toObjectRecord(toObjectRecord(event.message)?.usage);
+  if (!messageUsage) {
+    return undefined;
+  }
+  return readInputTokenTotal(messageUsage);
+}
+
+/**
+ * Input counts carried on `message_delta`. Anthropic reports input only on
+ * `message_start`, so this is normally absent; OpenAI-protocol proxies that zero
+ * `message_start` put the real counts here instead.
+ */
+function readStreamDeltaInputTokens(event: Record<string, unknown>): number | undefined {
+  const usage = toObjectRecord(event.usage);
+  if (!usage) {
+    return undefined;
+  }
+  return readInputTokenTotal(usage);
 }
 
 function readStreamRequestOutputTokens(event: Record<string, unknown>): number | undefined {
@@ -1931,6 +1947,8 @@ class ClaudeContextUsageState {
   private streamRequestOutputTokens: number | undefined;
   private compactedContextWindowUsedTokens: number | undefined;
   private completedResultTurns = 0;
+  /** Set when the host reported a zero input count on message_start (see streamUsedTokens). */
+  private streamRequestInputWithheld = false;
 
   constructor(initialContextWindowMaxTokens?: number) {
     this.contextWindowMaxTokens = initialContextWindowMaxTokens;
@@ -1940,6 +1958,7 @@ class ClaudeContextUsageState {
     this.streamRequestInputTokens = undefined;
     this.streamRequestOutputTokens = undefined;
     this.compactedContextWindowUsedTokens = undefined;
+    this.streamRequestInputWithheld = false;
   }
 
   setInitialContextWindowMaxTokens(contextWindowMaxTokens: number | undefined): void {
@@ -1967,12 +1986,24 @@ class ClaudeContextUsageState {
       }
       this.streamRequestInputTokens = inputTokens;
       this.streamRequestOutputTokens = 0;
+      if (inputTokens === 0) {
+        this.streamRequestInputWithheld = true;
+      }
     } else if (eventType === "message_delta") {
       const outputTokens = readStreamRequestOutputTokens(streamEvent);
       if (typeof outputTokens !== "number") {
         return null;
       }
       this.streamRequestOutputTokens = outputTokens;
+      // Recover the input count from the delta when message_start withheld it, so the
+      // ring tracks the real total mid-turn rather than waiting for the result message.
+      if (this.streamRequestInputWithheld) {
+        const deltaInputTokens = readStreamDeltaInputTokens(streamEvent);
+        if (typeof deltaInputTokens === "number" && deltaInputTokens > 0) {
+          this.streamRequestInputTokens = deltaInputTokens;
+          this.streamRequestInputWithheld = false;
+        }
+      }
     } else {
       return null;
     }
@@ -2003,9 +2034,16 @@ class ClaudeContextUsageState {
         usage.contextWindowMaxTokens = modelContextWindowMaxTokens;
       }
 
+      // `result.usage` aggregates every API call in the turn, so it over-counts once
+      // a turn makes more than one request; `iterations` isolates the last one. When a
+      // host reports neither iterations nor a usable message_start (OpenAI-protocol
+      // proxies zero it out), the aggregate is the only reading available, and it is
+      // per-request there because such hosts make one call per turn.
+      const canUseAggregateTotal =
+        this.completedResultTurns === 0 || this.streamRequestInputWithheld;
       const activeResultUsageTokens =
         readActiveUsageTokens(message.usage) ??
-        (this.completedResultTurns === 0 ? readLegacyResultUsageTokens(message.usage) : undefined);
+        (canUseAggregateTotal ? readLegacyResultUsageTokens(message.usage) : undefined);
       const usedTokens =
         this.streamUsedTokens() ?? activeResultUsageTokens ?? this.compactedContextWindowUsedTokens;
       if (usedTokens !== undefined) {
@@ -2023,6 +2061,14 @@ class ClaudeContextUsageState {
       typeof this.streamRequestInputTokens !== "number" ||
       typeof this.streamRequestOutputTokens !== "number"
     ) {
+      return undefined;
+    }
+    // A real request always spends input tokens on the system prompt, so a zero means
+    // the host withheld the count rather than measured it. OpenAI-protocol proxies
+    // cannot know the input size when they synthesize `message_start`, so they fill
+    // zero and report real usage only on the final chunk. Treat it as unknown so
+    // buildResultUsage falls back to `result.usage`.
+    if (this.streamRequestInputTokens === 0) {
       return undefined;
     }
     const usedTokens = this.streamRequestInputTokens + this.streamRequestOutputTokens;

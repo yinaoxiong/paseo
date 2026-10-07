@@ -2100,13 +2100,17 @@ describe("ClaudeAgentSession context window usage", () => {
     };
   }
 
-  function createMessageDeltaEvent(outputTokens: number): Record<string, unknown> {
+  function createMessageDeltaEvent(
+    outputTokens: number,
+    inputUsage: Record<string, unknown> = {},
+  ): Record<string, unknown> {
     return {
       type: "stream_event",
       event: {
         type: "message_delta",
         usage: {
           output_tokens: outputTokens,
+          ...inputUsage,
         },
       },
       session_id: "session-1",
@@ -2661,6 +2665,112 @@ describe("ClaudeAgentSession context window usage", () => {
         contextWindowMaxTokens: 200_000,
         contextWindowUsedTokens: 17_261,
       });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("uses result usage across turns when the host zeroes message_start and sends no iterations", async () => {
+    // OpenAI-protocol proxies (e.g. tt-switch) cannot know the input size when they
+    // synthesize message_start, so they emit zeros there, report real usage only on
+    // message_delta, and always send `iterations: []`. Verified against a live
+    // gateway. Every turn must still report the full context total.
+    const gatewayTurn = (
+      inputTokens: number,
+      cacheReadTokens: number,
+      cacheCreationTokens: number,
+      outputTokens: number,
+    ) => [
+      createMessageStartEvent({ input_tokens: 0, output_tokens: 0 }),
+      createMessageDeltaEvent(outputTokens),
+      createSuccessResult({
+        usage: {
+          input_tokens: inputTokens,
+          cache_creation_input_tokens: cacheCreationTokens,
+          cache_read_input_tokens: cacheReadTokens,
+          output_tokens: outputTokens,
+          iterations: [],
+        },
+        modelUsage: { "claude-sonnet-4-6": { contextWindow: 200_000 } },
+      }),
+    ];
+
+    const session = await createSessionForTurns([
+      [createInitMessage(), ...gatewayTurn(8_553, 33_002, 9_089, 3)],
+      gatewayTurn(2, 42_091, 8_559, 3),
+      gatewayTurn(2, 33_002, 17_745, 3),
+    ]);
+
+    try {
+      const expectedUsedTokens = [50_647, 50_655, 50_752];
+      for (const [turnIndex, expectedUsed] of expectedUsedTokens.entries()) {
+        const events = await collectStreamEvents(session, `turn-${turnIndex}`);
+
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            type: "turn_completed",
+            provider: "claude",
+            usage: expect.objectContaining({
+              contextWindowMaxTokens: 200_000,
+              contextWindowUsedTokens: expectedUsed,
+            }),
+          }),
+        );
+
+        // The zeroed message_start must never surface as a usage reading of its own:
+        // 0 + output_tokens would render the ring at ~0% for the whole turn.
+        const streamedUsedTokens = events
+          .filter((event) => event.type === "usage_updated")
+          .map((event) => event.usage.contextWindowUsedTokens);
+        expect(streamedUsedTokens).not.toContain(3);
+      }
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("streams live context usage from message_delta input counts when message_start is zeroed", async () => {
+    // The same proxies that zero message_start do report real input counts on
+    // message_delta (verified against a live gateway: input_tokens 42 +
+    // cache_read_input_tokens 26_752 alongside output_tokens 13). Reading them keeps
+    // the ring moving during the turn instead of only jumping once on result.
+    const session = await createSessionForTurns([
+      [
+        createInitMessage(),
+        createMessageStartEvent({ input_tokens: 0, output_tokens: 0 }),
+        createMessageDeltaEvent(13, { input_tokens: 42, cache_read_input_tokens: 26_752 }),
+        createSuccessResult({
+          usage: {
+            input_tokens: 42,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 26_752,
+            output_tokens: 13,
+            iterations: [],
+          },
+          modelUsage: { "claude-sonnet-4-6": { contextWindow: 200_000 } },
+        }),
+      ],
+    ]);
+
+    try {
+      const events = await collectStreamEvents(session, "turn");
+
+      const streamedUsedTokens = events
+        .filter((event) => event.type === "usage_updated")
+        .map((event) => event.usage.contextWindowUsedTokens);
+      expect(streamedUsedTokens).toContain(26_807);
+      expect(streamedUsedTokens).not.toContain(13);
+
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "turn_completed",
+          provider: "claude",
+          usage: expect.objectContaining({
+            contextWindowMaxTokens: 200_000,
+            contextWindowUsedTokens: 26_807,
+          }),
+        }),
+      );
     } finally {
       await session.close();
     }

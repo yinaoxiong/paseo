@@ -859,6 +859,38 @@ describe("ACP context-window usage", () => {
     ]);
   });
 
+  test("keeps valid context readings across partial notifications and accepts an empty context", async () => {
+    const session = createSessionWithConfig({ provider: "dsh" });
+    asInternals<ACPSessionInternals>(session).sessionId = "session-1";
+    const events: unknown[] = [];
+    session.subscribe((event) => {
+      if (event.type === "usage_updated") events.push(event);
+    });
+    for (const update of [
+      { used: 42, size: 1000 },
+      { used: 43, size: 0 },
+      { used: Number.NaN, size: 2000 },
+      { used: 0, size: 1000 },
+    ]) {
+      await session.sessionUpdate({
+        sessionId: "session-1",
+        update: { sessionUpdate: "usage_update", ...update },
+      });
+    }
+    expect(events).toEqual([
+      {
+        type: "usage_updated",
+        provider: "dsh",
+        usage: { contextWindowMaxTokens: 1000, contextWindowUsedTokens: 42 },
+      },
+      {
+        type: "usage_updated",
+        provider: "dsh",
+        usage: { contextWindowMaxTokens: 1000, contextWindowUsedTokens: 0 },
+      },
+    ]);
+  });
+
   test("emits nothing when size and used cannot both drive a meter", async () => {
     await expect(
       emitUsageUpdate({ used: -1, size: 0 }).then((result) => result.events),

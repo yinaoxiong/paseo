@@ -54,6 +54,10 @@ export interface ProviderSelectionReadiness {
   reason?: string;
 }
 
+function requiresExplicitModels(provider: string): boolean {
+  return provider === "cursor-sdk";
+}
+
 function buildModelRows(
   provider: string,
   providerLabel: string,
@@ -95,6 +99,9 @@ function buildModelSelection(
   }
   const selectableModels = filterSelectableModels(models) ?? [];
   if (selectableModels.length === 0) {
+    if (requiresExplicitModels(provider)) {
+      return { kind: "error", message: "No Cursor SDK models" };
+    }
     return { kind: "models", rows: [buildSyntheticDefaultRow(provider, providerLabel)] };
   }
   return { kind: "models", rows: buildModelRows(provider, providerLabel, selectableModels) };

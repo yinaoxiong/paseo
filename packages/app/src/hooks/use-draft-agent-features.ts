@@ -7,6 +7,7 @@ import { mergeProviderPreferences, useFormPreferences } from "./use-form-prefere
 import {
   applyFeatureValues,
   pruneFeatureValues,
+  replaceProviderFeatureValues,
   resolveFeatureValues,
 } from "./feature-preferences";
 
@@ -114,6 +115,39 @@ export function useDraftAgentFeatures(input: {
       setLocalFeatureValues(next);
     }
   }, [availableFeatures, availableFeaturesRaw, localFeatureValues]);
+
+  useEffect(() => {
+    if (availableFeaturesRaw === undefined || !provider) {
+      return;
+    }
+    const next = pruneFeatureValues(persistedFeatureValues, availableFeatures);
+    if (next === persistedFeatureValues) {
+      return;
+    }
+
+    void updatePreferences((current) => {
+      const currentFeatureValues = current.providerPreferences?.[provider]?.featureValues ?? {};
+      const prunedFeatureValues = pruneFeatureValues(currentFeatureValues, availableFeatures);
+
+      if (prunedFeatureValues === currentFeatureValues) {
+        return current;
+      }
+
+      return replaceProviderFeatureValues({
+        preferences: current,
+        provider,
+        featureValues: prunedFeatureValues,
+      });
+    }).catch((error) => {
+      console.warn("[useDraftAgentFeatures] prune feature preferences failed", error);
+    });
+  }, [
+    availableFeatures,
+    availableFeaturesRaw,
+    persistedFeatureValues,
+    provider,
+    updatePreferences,
+  ]);
 
   const effectiveFeatureValues = Object.keys(featureValues).length > 0 ? featureValues : undefined;
   const setFeatureValue = useCallback(
