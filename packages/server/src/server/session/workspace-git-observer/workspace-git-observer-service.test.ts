@@ -129,6 +129,7 @@ function buildHarness(
     statusCalls,
     branchChanges,
     warnCalls,
+    activityStateListeners,
   };
 }
 
@@ -416,14 +417,13 @@ describe("git activity admission", () => {
     };
     const h = buildHarness({ gitActivity: policy });
 
-    h.service.syncObservers([makeDescriptor({ id: "ws1", workspaceDirectory: WS1 })]);
+    h.service.reconcileObservers([makeDescriptor({ id: "ws1", workspaceDirectory: WS1 })]);
     // Refused on first sight: no watchers yet.
     expect(h.registerCalls).toEqual([]);
 
     // The classification lands on its own. `fetch_workspaces` is a client
     // request, not a policy event, so nothing else would ever re-ask.
-    await policy.ensureClassification(WS1);
-    h.notifyActivityStateChanged(WS1);
+    await flushMicrotasks();
 
     expect(h.registerCalls).toEqual([WS1]);
     expect(h.service.getMetrics().subscriptionCount).toBe(1);
@@ -431,6 +431,41 @@ describe("git activity admission", () => {
     // Idempotent: a second notification must not register twice.
     h.notifyActivityStateChanged(WS1);
     expect(h.registerCalls).toEqual([WS1]);
+  });
+
+  test("pending classification cannot resurrect a removed or disposed observer", async () => {
+    let finish!: () => void;
+    const pending = new Promise<void>((complete) => {
+      finish = complete;
+    });
+    let automatic = false;
+    const base = createAllowingGitActivityPolicy();
+    const policy: GitActivityPolicyService = {
+      ...base,
+      isAutomatic: () => automatic,
+      peek: () => ({
+        configuredPolicy: "auto",
+        effectiveMode: automatic ? "automatic" : "unknown",
+        lastCheckedAt: null,
+      }),
+      ensureClassification: async (cwd) => {
+        await pending;
+        automatic = true;
+        return { cwd, automatic: true };
+      },
+    };
+    const h = buildHarness({ gitActivity: policy });
+    h.service.reconcileObservers([makeDescriptor({ id: "ws1", workspaceDirectory: WS1 })]);
+    expect(h.activityStateListeners.size).toBe(1);
+    h.service.reconcileObservers([]);
+    h.service.dispose();
+    expect(h.activityStateListeners.size).toBe(0);
+    finish();
+    await flushMicrotasks();
+    expect(h.registerCalls).toEqual([]);
+    expect(h.emitCwdCalls).toEqual([]);
+    h.notifyActivityStateChanged(WS1);
+    expect(h.emitCwdCalls).toEqual([]);
   });
 
   test("switching to manual drops an existing registration", () => {

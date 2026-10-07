@@ -77,14 +77,18 @@ export function createWorkspaceGitObserverService(deps: {
   const workspaceStates = new Map<string, WorkspaceGitWatchState>();
   const subscriptions = new Map<string, () => void>();
   /**
-   * The descriptors last presented to `syncObservers`.
+   * Desired targets from incremental syncs and subscription reconciliation.
    *
    * A workspace the policy refuses is dropped, and nothing would otherwise ask
    * again: `fetch_workspaces` is a client request, not a policy event. Keeping
    * the last set lets a self-driven admission change — an `auto`
    * classification landing — re-run the same sync that dropped it.
    */
-  const lastSyncedDescriptors = new Map<string, WorkspaceDescriptorPayload>();
+  const lastSyncedDescriptors = new Map<
+    string,
+    Pick<WorkspaceDescriptorPayload, "id" | "workspaceDirectory" | "workspaceKind">
+  >();
+  let disposed = false;
   const unsubscribers: Array<() => void> = [];
 
   function rememberDescriptorState(
@@ -168,7 +172,10 @@ export function createWorkspaceGitObserverService(deps: {
     }
     const pending = gitActivity
       .ensureClassification(normalizedCwd)
-      .then(() => undefined)
+      .then(() => {
+        if (disposed || !syncDesiredObservers(normalizedCwd)) return undefined;
+        return emitWorkspaceUpdateForCwd(normalizedCwd);
+      })
       .catch((error: unknown) => {
         logger.warn(
           { err: error, cwd: normalizedCwd },
@@ -195,7 +202,7 @@ export function createWorkspaceGitObserverService(deps: {
       // second one is the normal case on first sight, and nothing else would
       // ever ask for the real answer -- `fetch_workspaces` is a client request,
       // not a policy event. Kick the bounded classification off here; when it
-      // lands, the state-change subscription below re-runs this sync.
+      // lands, its completion re-runs the still-requested observations.
       requestClassificationWhenUndecided(normalizedCwd);
       return;
     }
@@ -244,9 +251,7 @@ export function createWorkspaceGitObserverService(deps: {
   }
 
   function syncObservers(workspaces: Iterable<WorkspaceDescriptorPayload>): void {
-    const present = new Set<string>();
     for (const workspace of workspaces) {
-      present.add(workspace.id);
       lastSyncedDescriptors.set(workspace.id, workspace);
       syncObserver(workspace.workspaceDirectory, {
         isGit: workspace.workspaceKind !== "directory",
@@ -254,37 +259,43 @@ export function createWorkspaceGitObserverService(deps: {
       });
       rememberDescriptorState(workspace.id, workspace);
     }
-    for (const workspaceId of Array.from(lastSyncedDescriptors.keys())) {
-      if (!present.has(workspaceId)) {
-        lastSyncedDescriptors.delete(workspaceId);
-      }
-    }
   }
 
-  // A classification landing is a policy event with no client request behind
-  // it. Re-run the sync that dropped the workspace so verified-local storage
-  // actually starts being observed.
-  const stateChangeSubscription = workspaceGitService.onGitActivityStateChanged((cwd) => {
-    const normalizedCwd = resolve(cwd);
-    const affected = Array.from(lastSyncedDescriptors.values()).filter(
-      (workspace) => resolve(workspace.workspaceDirectory) === normalizedCwd,
-    );
-    if (affected.length === 0) {
-      return;
+  function syncDesiredObservers(cwd: string): boolean {
+    let affected = false;
+    for (const workspace of lastSyncedDescriptors.values()) {
+      if (resolve(workspace.workspaceDirectory) !== cwd) continue;
+      affected = true;
+      syncObserver(workspace.workspaceDirectory, {
+        isGit: workspace.workspaceKind !== "directory",
+        workspaceId: workspace.id,
+      });
     }
-    // Re-running the sync is what starts observation; the workspace
-    // projection is re-broadcast by the session's own listener, so this does
-    // not also emit.
-    syncObservers(affected);
+    return affected;
+  }
+
+  // This observer owns both resubscription and projection notifications, so
+  // dispose releases the only activity listener that captures the session.
+  const stateChangeSubscription = workspaceGitService.onGitActivityStateChanged((cwd) => {
+    if (disposed) return;
+    const normalizedCwd = resolve(cwd);
+    if (!syncDesiredObservers(normalizedCwd)) return;
+    void emitWorkspaceUpdateForCwd(normalizedCwd).catch((error) => {
+      logger.warn({ err: error, cwd: normalizedCwd }, "Failed to emit Git activity update");
+    });
   });
   unsubscribers.push(() => stateChangeSubscription.unsubscribe());
   return {
     reconcileObservers(workspaces) {
       const retained = new Map([...workspaces].map((workspace) => [workspace.id, workspace]));
+      for (const workspaceId of lastSyncedDescriptors.keys()) {
+        if (!retained.has(workspaceId)) lastSyncedDescriptors.delete(workspaceId);
+      }
       for (const workspaceId of workspaceStates.keys()) {
         if (!retained.has(workspaceId)) removeForWorkspaceId(workspaceId);
       }
       for (const workspace of retained.values()) {
+        lastSyncedDescriptors.set(workspace.id, workspace);
         syncObserver(workspace.workspaceDirectory, {
           isGit: workspace.workspaceKind !== "directory",
           workspaceId: workspace.id,
@@ -313,9 +324,13 @@ export function createWorkspaceGitObserverService(deps: {
       };
     },
 
-    removeForWorkspaceId,
+    removeForWorkspaceId(workspaceId) {
+      lastSyncedDescriptors.delete(workspaceId);
+      removeForWorkspaceId(workspaceId);
+    },
 
     dispose() {
+      disposed = true;
       for (const unsubscribe of unsubscribers.splice(0)) {
         unsubscribe();
       }

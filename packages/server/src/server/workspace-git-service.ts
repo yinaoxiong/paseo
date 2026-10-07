@@ -1837,11 +1837,10 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
         (error, events) => {
           // Late deliveries from a watcher already closed by a policy
           // transition must not trigger Git refreshes.
-          if (
-            target.closed ||
-            !this.isAdmissionCurrent(generation) ||
-            !this.isAutomaticAllowed(target.cwd)
-          ) {
+          // A surviving watcher remains valid across admission generations.
+          // Revoked watchers have a closed target; asynchronous installation
+          // below still checks the generation before accepting a subscription.
+          if (target.closed || !this.isAutomaticAllowed(target.cwd)) {
             return;
           }
           if (error) {

@@ -308,6 +308,7 @@ interface SessionForTestOptions {
     resolveForge?: ReturnType<typeof vi.fn>;
     getWorkspaceGitMetadata?: ReturnType<typeof vi.fn>;
     getProjectSlug?: ReturnType<typeof vi.fn>;
+    onGitActivityStateChanged?: SessionOptions["workspaceGitService"]["onGitActivityStateChanged"];
   };
   workspaceRegistry?: { get: ReturnType<typeof vi.fn> };
   projectRegistry?: Partial<SessionOptions["projectRegistry"]>;
@@ -484,6 +485,25 @@ test("routes host-scoped agent skills requests through the daemon owner", async 
     type: "agent.skills.save_selection.response",
     payload: { requestId: "save-skills", ...status, confirmationRequired: null },
   });
+});
+
+test("cleanup releases the session Git activity listener", async () => {
+  const listeners = new Set<(cwd: string) => void>();
+  const session = createSessionForTest({
+    workspaceGitService: {
+      onGitActivityStateChanged: (listener) => {
+        listeners.add(listener);
+        return {
+          unsubscribe: () => {
+            listeners.delete(listener);
+          },
+        };
+      },
+    },
+  });
+  expect(listeners.size).toBe(1);
+  await session.cleanup();
+  expect(listeners.size).toBe(0);
 });
 
 test("routes plugin requests and releases its owned catalog subscription on cleanup", async () => {

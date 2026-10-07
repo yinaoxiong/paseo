@@ -156,6 +156,40 @@ test.describe("automatic Git", () => {
   });
 });
 
+test("a cold local subscription converges and survives an unrelated settings change", async ({
+  page,
+  e2eWorker,
+}) => {
+  const workspace = await seedWorkspace({ repoPrefix: "git-auto-cold-" });
+  let configClient: Awaited<ReturnType<typeof connectNewWorkspaceDaemonClient>> | undefined;
+  try {
+    configClient = await connectNewWorkspaceDaemonClient({ ownProjects: false });
+    await configClient.patchDaemonConfig({ git: { policy: "auto" } });
+    await configClient.close();
+    configClient = undefined;
+    await e2eWorker.restart();
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await gotoWorkspace(page, workspace.workspaceId);
+    await openChangesTreePanel(page);
+    const panel = page.getByTestId("changes-tree-panel").filter({ visible: true });
+    await writeFile(path.join(workspace.repoPath, "auto-cold.txt"), "local automatic update\n");
+    await expect(panel.getByText("auto-cold.txt", { exact: true })).toBeVisible();
+    configClient = await connectNewWorkspaceDaemonClient({ ownProjects: false });
+    await configClient.patchDaemonConfig({ mcp: { injectIntoAgents: true } });
+    await writeFile(
+      path.join(workspace.repoPath, "after-settings.txt"),
+      "watcher survives settings\n",
+    );
+    await expect(panel.getByText("after-settings.txt", { exact: true })).toBeVisible();
+  } finally {
+    if (configClient) {
+      await configClient.patchDaemonConfig({ git: { policy: "manual" } });
+      await configClient.close();
+    }
+    await workspace.cleanup();
+  }
+});
+
 test("an older private host gets an update message instead of an unsupported diff request", async ({
   page,
 }) => {
