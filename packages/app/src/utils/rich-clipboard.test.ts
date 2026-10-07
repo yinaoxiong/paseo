@@ -76,6 +76,13 @@ describe("createMarkdownClipboardContent", () => {
     expect(content.html).toContain("&lt;script&gt;");
   });
 
+  it("puts escaped formula source on the html clipboard", () => {
+    const content = createMarkdownClipboardContent("Energy is $E = mc^2$.");
+
+    expect(content.plainText).toBe("Energy is $E = mc^2$.");
+    expect(content.html).toContain('<code class="math-inline">$E = mc^2$</code>');
+  });
+
   it("preserves assistant file links without allowing unsafe link schemes", () => {
     const content = createMarkdownClipboardContent(
       [

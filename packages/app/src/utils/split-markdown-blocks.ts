@@ -1,7 +1,13 @@
 import MarkdownIt from "markdown-it";
+import {
+  findUnescapedDelimiter,
+  getDisplayMathDelimiter,
+  markdownMath,
+  type DisplayMathClosing,
+} from "./markdown-math";
 
 // Only block maps are needed here; inline parsing belongs to each rendered block.
-const markdownBlockParser = new MarkdownIt();
+const markdownBlockParser = new MarkdownIt().use(markdownMath);
 markdownBlockParser.core.ruler.disable("inline");
 
 // The renderer decides what counts as a definition, so ask the same parser: a block
@@ -32,7 +38,6 @@ function foldLinkReferenceDefinitions(blocks: string[]): string[] {
   if (leading.length > 0) folded.push(leading.join("\n\n"));
   return folded;
 }
-
 export function splitMarkdownBlocks(text: string): string[] {
   if (text.length === 0) {
     return [];
@@ -43,6 +48,7 @@ export function splitMarkdownBlocks(text: string): string[] {
   let sawBlockSeparator = false;
   const lines = text.split("\n");
   const structuralBlankLines = getStructuralBlankLines(text, lines);
+  addUnclosedDisplayMathBlankLines(lines, structuralBlankLines);
 
   for (const [index, line] of lines.entries()) {
     const isBlankLine = line.trim().length === 0;
@@ -89,4 +95,25 @@ function getStructuralBlankLines(text: string, lines: string[]): Set<number> {
     }
   }
   return blankLines;
+}
+
+function addUnclosedDisplayMathBlankLines(lines: string[], blankLines: Set<number>): void {
+  let activeDisplayMathClosing: DisplayMathClosing | null = null;
+
+  for (const [index, line] of lines.entries()) {
+    if (activeDisplayMathClosing) {
+      if (line.trim().length === 0) {
+        blankLines.add(index);
+      }
+      if (findUnescapedDelimiter(line, activeDisplayMathClosing) !== -1) {
+        activeDisplayMathClosing = null;
+      }
+      continue;
+    }
+
+    const displayMathDelimiter = getDisplayMathDelimiter(line);
+    if (displayMathDelimiter && !displayMathDelimiter.closesOnOpeningLine) {
+      activeDisplayMathClosing = displayMathDelimiter.closing;
+    }
+  }
 }

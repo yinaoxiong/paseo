@@ -67,12 +67,15 @@ import { getMarkdownListMarker, getMarkdownListSpacing } from "@/utils/markdown-
 import { markdownNodeContainsType } from "@/utils/markdown-ast";
 import { useStableEvent } from "@/hooks/use-stable-event";
 import { HighlightedCodeBlock } from "@/components/highlighted-code-block";
+import { MathFormula } from "@/components/math-formula";
+import { getMathFormulaTextStyle } from "@/components/math-formula-style";
 import { MarkdownFenceBlock } from "@/components/markdown/fence";
 import type { MarkdownPhase } from "@/components/markdown/fence/types";
 import { splitMarkdownBlocks } from "@/utils/split-markdown-blocks";
 import { useRevealedText } from "@/hooks/use-revealed-text";
 import { colorMarkdownLinkChildren } from "@/components/markdown/link-children";
 import { createAssistantMarkdownParser } from "@/utils/assistant-markdown-parser";
+import { getMathFormulaRenderModel } from "@/utils/markdown-math";
 import { formatDuration, formatMessageTimestamp } from "@/utils/time";
 import { getTurnDurationLabel } from "./assistant-turn-footer-label";
 import { writeMarkdownToRichClipboard } from "@/utils/rich-clipboard";
@@ -997,6 +1000,17 @@ function getMarkdownNodeText(node: ASTNode): string {
   return node.children.map(getMarkdownNodeText).join("");
 }
 
+function getMathFormulaProps(node: ASTNode) {
+  const sourceInfo =
+    "sourceInfo" in node && typeof node.sourceInfo === "string" ? node.sourceInfo : undefined;
+  return getMathFormulaRenderModel({
+    type: node.type,
+    content: node.content ?? "",
+    markup: node.markup,
+    sourceInfo,
+  });
+}
+
 function nodeHasParentType(parent: unknown, type: string): boolean {
   if (Array.isArray(parent)) {
     return parent.some((entry) => entry?.type === type);
@@ -1739,6 +1753,30 @@ export const AssistantMessage = memo(function AssistantMessage({
         <MarkdownTextSpan key={node.key} style={styles.softbreak}>
           {"\n"}
         </MarkdownTextSpan>
+      ),
+      math_inline: (
+        node: ASTNode,
+        _children: ReactNode[],
+        _parent: ASTNode[],
+        styles: MarkdownStyles,
+      ) => (
+        <MathFormula
+          key={node.key}
+          {...getMathFormulaProps(node)}
+          textStyle={getMathFormulaTextStyle(styles.text, styles.body)}
+        />
+      ),
+      math_block: (
+        node: ASTNode,
+        _children: ReactNode[],
+        _parent: ASTNode[],
+        styles: MarkdownStyles,
+      ) => (
+        <MathFormula
+          key={node.key}
+          {...getMathFormulaProps(node)}
+          textStyle={getMathFormulaTextStyle(styles.text, styles.body)}
+        />
       ),
       code_block: (
         node: ASTNode,
