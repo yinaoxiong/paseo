@@ -5209,16 +5209,128 @@ describe("update_schedule MCP tool", () => {
     ).rejects.toThrow("Specify at most one of expiresIn or clearExpires");
     expect(update).not.toHaveBeenCalled();
   });
+
+  it("returns a summary without run history", async () => {
+    const { agentManager, agentStorage } = createTestDeps();
+    const stored = {
+      ...makeStoredSchedule(),
+      runs: [
+        {
+          id: "run-1",
+          scheduledFor: "2026-04-11T00:00:00.000Z",
+          startedAt: "2026-04-11T00:00:01.000Z",
+          endedAt: "2026-04-11T00:00:05.000Z",
+          status: "succeeded" as const,
+          agentId: null,
+          output: "done",
+          error: null,
+        },
+      ],
+    };
+    const update = vi.fn(async () => stored);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      scheduleService: scheduleServiceWithUpdate(update, stored),
+      logger,
+    });
+    const tool = registeredTool(server, "update_schedule");
+
+    const result = await tool.handler({
+      id: "schedule-1",
+      name: "updated name",
+    });
+
+    expect(result.structuredContent).toEqual({
+      id: "schedule-1",
+      name: "test schedule",
+      prompt: "say hello",
+      cadence: { type: "every", everyMs: 300000 },
+      target: { type: "new-agent", config: { provider: "claude", cwd: "/tmp" } },
+      status: "active",
+      createdAt: "2026-04-11T00:00:00.000Z",
+      updatedAt: "2026-04-11T00:00:00.000Z",
+      nextRunAt: "2026-04-11T00:05:00.000Z",
+      lastRunAt: null,
+      pausedAt: null,
+      expiresAt: null,
+      maxRuns: null,
+    });
+  });
+});
+
+describe("inspect_schedule MCP tool", () => {
+  const logger = createTestLogger();
+
+  it("returns counts and the latest run preview without the full history", async () => {
+    const { agentManager, agentStorage } = createTestDeps();
+    const stored = createStoredSchedule({
+      name: "nightly",
+      prompt: "say hello",
+      cadence: { type: "cron", expression: "*/5 * * * *" },
+      target: { type: "new-agent", config: { provider: "codex", cwd: "/tmp" } },
+    });
+    stored.runs = [
+      {
+        id: "run-1",
+        scheduledFor: "2026-04-11T00:00:00.000Z",
+        startedAt: "2026-04-11T00:00:01.000Z",
+        endedAt: "2026-04-11T00:00:05.000Z",
+        status: "failed",
+        agentId: null,
+        output: "old",
+        error: "boom",
+      },
+      {
+        id: "run-2",
+        scheduledFor: "2026-04-11T00:05:00.000Z",
+        startedAt: "2026-04-11T00:05:01.000Z",
+        endedAt: "2026-04-11T00:05:05.000Z",
+        status: "succeeded",
+        agentId: null,
+        output: "latest",
+        error: null,
+      },
+    ];
+    const inspect = vi.fn(async () => stored);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      scheduleService: { inspect } as unknown as ScheduleService,
+      logger,
+    });
+    const tool = registeredTool(server, "inspect_schedule");
+
+    const result = await tool.handler({ id: "schedule-1" });
+
+    expect(result.structuredContent).toMatchObject({
+      id: "schedule-1",
+      name: "nightly",
+      prompt: "say hello",
+      runCount: 2,
+      failedCount: 1,
+      lastRun: stored.runs[1],
+    });
+    expect(result.structuredContent).not.toHaveProperty("runs");
+  });
 });
 
 describe("schedule_logs MCP tool", () => {
   const logger = createTestLogger();
 
-  function makeRun(overrides: Partial<{ id: string; status: string }> = {}) {
+  function makeRun(
+    overrides: Partial<{
+      id: string;
+      status: "running" | "succeeded" | "failed";
+      startedAt: string;
+    }> = {},
+  ) {
     return {
       id: overrides.id ?? "run-1",
       scheduledFor: "2026-04-11T00:00:00.000Z",
-      startedAt: "2026-04-11T00:00:01.000Z",
+      startedAt: overrides.startedAt ?? "2026-04-11T00:00:01.000Z",
       endedAt: "2026-04-11T00:00:05.000Z",
       status: overrides.status ?? "succeeded",
       agentId: null,
@@ -5227,27 +5339,88 @@ describe("schedule_logs MCP tool", () => {
     };
   }
 
-  it("returns runs for a schedule", async () => {
+  function storedWithRuns(runs: ReturnType<typeof makeRun>[]): StoredSchedule {
+    return {
+      ...createStoredSchedule({
+        prompt: "say hello",
+        cadence: { type: "cron", expression: "*/5 * * * *" },
+        target: { type: "new-agent", config: { provider: "codex", cwd: "/tmp" } },
+      }),
+      runs,
+    };
+  }
+
+  it("returns a newest-first page instead of the full history", async () => {
     const { agentManager, agentStorage } = createTestDeps();
-    const runs = [makeRun({ id: "run-1" }), makeRun({ id: "run-2", status: "failed" })];
-    const logs = vi.fn(async (_id: string) => runs);
-    const inspect = vi.fn(async () => ({
-      id: "schedule-1",
-      target: { type: "new-agent", config: { provider: "codex", cwd: "/tmp" } },
-    }));
+    const runs = Array.from({ length: 3 }, (_, index) =>
+      makeRun({
+        id: `run-${index + 1}`,
+        startedAt: `2026-04-11T00:0${index}:01.000Z`,
+      }),
+    );
+    const inspect = vi.fn(async () => storedWithRuns(runs));
     const server = await createAgentMcpServer({
       agentManager,
       agentStorage,
       providerSnapshotManager: createOpenCodeManager().manager,
-      scheduleService: { logs, inspect } as unknown as ScheduleService,
+      scheduleService: { inspect } as unknown as ScheduleService,
       logger,
     });
     const tool = registeredTool(server, "schedule_logs");
 
     const result = await tool.handler({ id: "schedule-1" });
 
-    expect(logs).toHaveBeenCalledWith("schedule-1");
-    expect(result.structuredContent).toEqual({ runs });
+    expect(result.structuredContent).toEqual({
+      runs: [runs[2], runs[1], runs[0]],
+      total: 3,
+      returned: 3,
+      hasMore: false,
+      nextBefore: null,
+    });
+  });
+
+  it("pages older runs from before and rejects oversize limits", async () => {
+    const { agentManager, agentStorage } = createTestDeps();
+    const runs = Array.from({ length: 5 }, (_, index) =>
+      makeRun({
+        id: `run-${index + 1}`,
+        startedAt: `2026-04-11T00:0${index}:01.000Z`,
+      }),
+    );
+    const inspect = vi.fn(async () => storedWithRuns(runs));
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      scheduleService: { inspect } as unknown as ScheduleService,
+      logger,
+    });
+    const tool = registeredTool(server, "schedule_logs");
+
+    const first = await tool.handler({ id: "schedule-1", limit: 2 });
+    expect(first.structuredContent).toEqual({
+      runs: [runs[4], runs[3]],
+      total: 5,
+      returned: 2,
+      hasMore: true,
+      nextBefore: "run-4",
+    });
+
+    const second = await tool.handler({
+      id: "schedule-1",
+      limit: 2,
+      before: "run-4",
+    });
+    expect(second.structuredContent).toEqual({
+      runs: [runs[2], runs[1]],
+      total: 5,
+      returned: 2,
+      hasMore: true,
+      nextBefore: "run-2",
+    });
+
+    const parsed = await tool.inputSchema.safeParseAsync({ id: "schedule-1", limit: 101 });
+    expect(parsed.success).toBe(false);
   });
 
   it("throws when schedule service is not configured", async () => {
@@ -5263,6 +5436,51 @@ describe("schedule_logs MCP tool", () => {
     await expect(tool.handler({ id: "schedule-1" })).rejects.toThrow(
       "Schedule service is not configured",
     );
+  });
+});
+
+describe("run_schedule_once MCP tool", () => {
+  const logger = createTestLogger();
+
+  it("returns a summary without run history", async () => {
+    const { agentManager, agentStorage } = createTestDeps();
+    const stored = createStoredSchedule({
+      prompt: "say hello",
+      cadence: { type: "cron", expression: "*/5 * * * *" },
+      target: { type: "new-agent", config: { provider: "codex", cwd: "/tmp" } },
+    });
+    stored.runs = [
+      {
+        id: "run-1",
+        scheduledFor: "2026-04-11T00:00:00.000Z",
+        startedAt: "2026-04-11T00:00:01.000Z",
+        endedAt: "2026-04-11T00:00:05.000Z",
+        status: "succeeded",
+        agentId: null,
+        output: "done",
+        error: null,
+      },
+    ];
+    const inspect = vi.fn(async () => stored);
+    const runOnce = vi.fn(async () => stored);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      scheduleService: { inspect, runOnce } as unknown as ScheduleService,
+      logger,
+    });
+    const tool = registeredTool(server, "run_schedule_once");
+
+    const result = await tool.handler({ id: "schedule-1" });
+
+    expect(runOnce).toHaveBeenCalledWith("schedule-1");
+    expect(result.structuredContent).not.toHaveProperty("runs");
+    expect(result.structuredContent).toMatchObject({
+      id: "schedule-1",
+      prompt: "say hello",
+      status: "active",
+    });
   });
 });
 
