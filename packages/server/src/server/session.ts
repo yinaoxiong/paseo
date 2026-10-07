@@ -962,12 +962,6 @@ export class Session {
       logger: this.sessionLogger,
       gitActivity: options.gitActivity,
     });
-    // A self-driven mode change -- an `auto` classification landing, not a host
-    // policy edit -- has no other trigger. Without this the projection keeps
-    // reporting "undetermined" for a workspace the daemon has since verified.
-    this.workspaceGitService.onGitActivityStateChanged((cwd) => {
-      void this.emitWorkspaceUpdateForCwd(cwd).catch(() => undefined);
-    });
     this.workspaceGitObserver = createWorkspaceGitObserverService({
       workspaceGitService: this.workspaceGitService,
       emitWorkspaceUpdateForCwd: (cwd) => this.emitWorkspaceUpdateForCwd(cwd),

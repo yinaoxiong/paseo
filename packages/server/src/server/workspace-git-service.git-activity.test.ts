@@ -163,6 +163,21 @@ describe("WorkspaceGitService git activity admission", () => {
     vi.useRealTimers();
   });
 
+  test("an admitted working-tree watcher survives repeated policy application", async () => {
+    const watcher = createWatcherHarness();
+    const service = createService(watcher, createAllowingGitActivityPolicy());
+    const changed = vi.fn();
+    const subscription = await service.requestWorkingTreeWatch(REPO_CWD, changed);
+    const record = watcher.records.find((entry) => entry.directory === REPO_CWD);
+    if (!record) throw new Error("Working-tree watcher was not installed");
+    service.applyGitActivityPolicy();
+    service.applyGitActivityPolicy();
+    record.callback(null, [{ path: path.join(REPO_CWD, "README.md"), type: "update" }]);
+    expect(changed).toHaveBeenCalledTimes(1);
+    subscription.unsubscribe();
+    await service.dispose();
+  });
+
   test("a manual workspace registers a listener without any watcher, fetch or snapshot", async () => {
     const watcher = createWatcherHarness();
     const service = createService(watcher, createManualGitActivityPolicy());
