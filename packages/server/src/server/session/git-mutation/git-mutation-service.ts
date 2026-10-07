@@ -7,6 +7,7 @@ import {
 } from "../../../utils/checkout-git.js";
 import { runGitCommand } from "../../../utils/run-git-command.js";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
+import type { GitActivityPolicyService } from "../../git-activity/policy.js";
 import { assertSafeGitRef as assertWorktreeSafeGitRef } from "../../worktree-session.js";
 
 /**
@@ -42,8 +43,14 @@ type GitMutationGitSource = Pick<
 export function createGitMutationService(deps: {
   workspaceGitService: GitMutationGitSource;
   logger: pino.Logger;
+  /**
+   * Host-global Git activity admission. Mutations themselves always run — the
+   * user asked for them — but the follow-up refresh must not leave observation
+   * behind on a workspace that is not admitted.
+   */
+  gitActivity?: GitActivityPolicyService;
 }): GitMutationService {
-  const { workspaceGitService, logger } = deps;
+  const { workspaceGitService, logger, gitActivity } = deps;
 
   function assertSafeGitRef(ref: string, label: string): void {
     if (!/^[A-Za-z0-9._/-]+$/.test(ref)) {
@@ -79,6 +86,13 @@ export function createGitMutationService(deps: {
   ): Promise<void> {
     if (options?.invalidateForge) {
       workspaceGitService.invalidateForge(cwd);
+    }
+    // A mutation's own validation reads (dirty check, branch resolution) must
+    // still happen: they are part of the user's action. What must not happen is
+    // arming background observation, so a non-admitted workspace gets no
+    // snapshot refresh that would revive watchers.
+    if (gitActivity && !gitActivity.isAutomatic(cwd)) {
+      return;
     }
     try {
       await workspaceGitService.getSnapshot(cwd, { force: true, reason });

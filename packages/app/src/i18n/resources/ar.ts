@@ -939,6 +939,8 @@ export const ar: TranslationResources = {
         refresh: "ينعش",
         refreshState: "تحديث حالة git و{{brand}}",
         failedRefresh: "فشل تحديث حالة git.",
+        manualRefreshHostUpdate: "حدّث المضيف لتحديث تغييرات Git في الوضع اليدوي.",
+        manualRefreshRequired: "تحديثات Git التلقائية متوقفة مؤقتًا. حدّث لقراءة هذه الفروق.",
         seeUncommittedChanges: "عرض التغييرات غير الملتزم بها",
         seeCommittedChanges: "عرض التغييرات الملتزم بها",
         checkingRepository: "فحص المستودع...",

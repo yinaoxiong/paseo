@@ -11,6 +11,7 @@ import type {
   CheckoutRefreshRequest,
   CheckoutRenameBranchRequest,
   CheckoutStatusRequest,
+  CheckoutStatusResponse,
   SessionInboundMessage,
   SessionOutboundMessage,
   SubscribeCheckoutDiffRequest,
@@ -22,7 +23,7 @@ import type {
   CheckoutDiffSubscription,
   CheckoutDiffSubscriptionRequest,
 } from "../../checkout-diff-manager.js";
-import { toCheckoutError } from "../../checkout-git-utils.js";
+import { toCheckoutError, type CheckoutErrorPayload } from "../../checkout-git-utils.js";
 import {
   buildCheckoutPrStatusPayloadFromSnapshot,
   buildCheckoutStatusPayloadFromSnapshot,
@@ -56,6 +57,7 @@ import {
 import { runGitCommand } from "../../../utils/run-git-command.js";
 import { expandTilde } from "../../../utils/path.js";
 import type { GitMetadataGenerator } from "./git-metadata-generator.js";
+import type { GitActivityPolicyService } from "../../git-activity/policy.js";
 
 /**
  * The collaborators a checkout command reaches that are NOT part of the checkout
@@ -81,6 +83,40 @@ type CurrentWorkspacePullRequest = NonNullable<
 > & {
   number: number;
 };
+
+/**
+ * Why an automatic Git read was refused. Reuses the existing NOT_ALLOWED code —
+ * the closed CheckoutErrorCode union is not extended for this feature.
+ */
+const GIT_ACTIVITY_PAUSED_MESSAGE =
+  "Automatic Git updates are paused for this workspace. Refresh to read Git state.";
+
+/**
+ * A refresh that read Git must also deliver that Git state. Projecting it can only
+ * fail on a malformed snapshot, and reporting `success: true` with no status would
+ * show the user a refresh that "worked" and changed nothing — silently dropping the
+ * payload is worse than failing visibly.
+ */
+function toRefreshError(error: unknown): CheckoutErrorPayload {
+  if (error instanceof CheckoutStatusProjectionError) {
+    // Git was read; only delivery failed. NOT_ALLOWED says "no result delivered"
+    // without extending the closed CheckoutErrorCode union.
+    return { code: "NOT_ALLOWED", message: error.message };
+  }
+  return toCheckoutError(error);
+}
+
+class CheckoutStatusProjectionError extends Error {
+  constructor(cwd: string, cause: unknown) {
+    super(
+      `Refresh read Git state for ${cwd} but could not deliver the result: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
+    this.name = "CheckoutStatusProjectionError";
+    this.cause = cause;
+  }
+}
 
 class NoResolvedForgeServiceError extends Error {
   readonly authState = "no_remote" satisfies ForgeAuthState;
@@ -126,6 +162,11 @@ export interface CheckoutSessionOptions {
   github: ForgeService;
   checkoutDiffManager: CheckoutDiffSubscriber;
   gitMetadataGenerator: GitMetadataGenerator;
+  /**
+   * Host-global Git activity admission. Gates status reads and diff
+   * subscriptions; explicit user actions stay allowed.
+   */
+  gitActivity?: GitActivityPolicyService;
   paseoHome: string;
   worktreesRoot: string | undefined;
   logger: pino.Logger;
@@ -153,10 +194,16 @@ export class CheckoutSession {
   private readonly github: ForgeService;
   private readonly checkoutDiffManager: CheckoutDiffSubscriber;
   private readonly gitMetadataGenerator: GitMetadataGenerator;
+  private readonly gitActivity: GitActivityPolicyService | undefined;
   private readonly paseoHome: string;
   private readonly worktreesRoot: string | undefined;
   private readonly logger: pino.Logger;
   private readonly statusUpdateFingerprints = new Map<string, string>();
+  /**
+   * Last successful refresh per cwd. Manual mode reports it so a cached snapshot
+   * is visibly stale rather than looking current.
+   */
+  private readonly lastRefreshedAtByCwd = new Map<string, string>();
 
   constructor(options: CheckoutSessionOptions) {
     this.host = options.host;
@@ -165,6 +212,7 @@ export class CheckoutSession {
     this.github = options.github;
     this.checkoutDiffManager = options.checkoutDiffManager;
     this.gitMetadataGenerator = options.gitMetadataGenerator;
+    this.gitActivity = options.gitActivity;
     this.paseoHome = options.paseoHome;
     this.worktreesRoot = options.worktreesRoot;
     this.logger = options.logger;
@@ -236,6 +284,56 @@ export class CheckoutSession {
   async handleStatusRequest(msg: CheckoutStatusRequest): Promise<void> {
     const { cwd, requestId } = msg;
     const resolvedCwd = expandTilde(cwd);
+
+    // A status request carries no explicit user intent: it is what a client
+    // re-issues on mount, focus or reconnect. Under a manual policy it must not
+    // trigger Git work. Cached state is served and marked paused/stale; with
+    // nothing cached, the failure envelope tells the client to ask explicitly.
+    // The `isGit: false` in that envelope is a placeholder the protocol union
+    // requires — it is never a non-Git fact about the workspace.
+    if (this.gitActivity && !this.gitActivity.isAutomatic(resolvedCwd)) {
+      const cached = this.workspaceGitService.peekSnapshot(resolvedCwd);
+      if (cached) {
+        this.host.emit({
+          type: "checkout_status_response",
+          payload: {
+            ...buildCheckoutStatusPayloadFromSnapshot({
+              cwd,
+              requestId,
+              snapshot: cached,
+            }),
+            refreshState: "paused",
+            lastRefreshedAt: this.lastRefreshedAtByCwd.get(resolvedCwd) ?? null,
+          },
+        });
+        return;
+      }
+      this.host.emit({
+        type: "checkout_status_response",
+        payload: {
+          cwd,
+          isGit: false,
+          repoRoot: null,
+          currentBranch: null,
+          isDirty: null,
+          baseRef: null,
+          aheadBehind: null,
+          aheadOfOrigin: null,
+          behindOfOrigin: null,
+          hasRemote: false,
+          remoteUrl: null,
+          isPaseoOwnedWorktree: false,
+          error: {
+            code: "NOT_ALLOWED",
+            message: GIT_ACTIVITY_PAUSED_MESSAGE,
+          },
+          refreshState: "paused",
+          lastRefreshedAt: null,
+          requestId,
+        },
+      });
+      return;
+    }
 
     try {
       const snapshot = await this.workspaceGitService.getSnapshot(resolvedCwd);
@@ -479,18 +577,41 @@ export class CheckoutSession {
     await ownership.release(msg.subscriptionId);
   }
 
+  /**
+   * Explicit user refresh. This is the one read path that runs Git work under a
+   * manual policy, because the user asked for it.
+   *
+   * The snapshot is both returned in the response and published through
+   * `emitStatusUpdate`: manual mode has no live observer, so nothing else would
+   * ever deliver the new state. Failure updates nothing.
+   */
   async handleRefreshRequest(msg: CheckoutRefreshRequest): Promise<void> {
     const { cwd, requestId } = msg;
     const resolvedCwd = expandTilde(cwd);
 
     try {
       (await this.resolveForgeService(resolvedCwd))?.service.invalidate({ cwd: resolvedCwd });
-      await this.workspaceGitService.getSnapshot(resolvedCwd, {
+      const snapshot = await this.workspaceGitService.getSnapshot(resolvedCwd, {
         force: true,
         includeForge: true,
         reason: "manual-refresh",
       });
+      const refreshedAt = new Date().toISOString();
+      // Independent of any observer: manual mode has none.
+      this.emitStatusUpdate(resolvedCwd, snapshot, { refreshedAt });
+      // Only refresh the cached timestamp once the state was actually deliverable.
+      // A projection that fails must not leave a "refreshed at" that claims
+      // success, or a cached status that was never overwritten.
+      this.lastRefreshedAtByCwd.set(resolvedCwd, refreshedAt);
+      // Only refreshes a diff the user is already looking at; it never arms a
+      // subscription for one.
       this.checkoutDiffManager.scheduleRefreshForCwd(resolvedCwd);
+      let status: CheckoutStatusResponse["payload"];
+      try {
+        status = buildCheckoutStatusPayloadFromSnapshot({ cwd, requestId, snapshot });
+      } catch (error) {
+        throw new CheckoutStatusProjectionError(cwd, error);
+      }
       this.host.emit({
         type: "checkout.refresh.response",
         payload: {
@@ -498,22 +619,30 @@ export class CheckoutSession {
           success: true,
           error: null,
           requestId,
+          status,
         },
       });
     } catch (error) {
+      // Git itself failed, or the read succeeded but the result could not be
+      // delivered. Either way the user sees a failed refresh with a message and
+      // the existing error code — no new enum member, and no silent drop.
       this.host.emit({
         type: "checkout.refresh.response",
         payload: {
           cwd,
           success: false,
-          error: toCheckoutError(error),
+          error: toRefreshError(error),
           requestId,
         },
       });
     }
   }
 
-  emitStatusUpdate(cwd: string, snapshot: WorkspaceGitRuntimeSnapshot): void {
+  emitStatusUpdate(
+    cwd: string,
+    snapshot: WorkspaceGitRuntimeSnapshot,
+    options?: { refreshedAt?: string },
+  ): void {
     try {
       const requestId = `subscription:${cwd}`;
       const payload = {
@@ -527,6 +656,8 @@ export class CheckoutSession {
           requestId,
           snapshot,
         }),
+        refreshState: options?.refreshedAt ? ("fresh" as const) : undefined,
+        lastRefreshedAt: options?.refreshedAt ?? this.lastRefreshedAtByCwd.get(cwd) ?? null,
       };
       const fingerprint = JSON.stringify(payload);
       if (this.statusUpdateFingerprints.get(cwd) === fingerprint) return;
@@ -1133,9 +1264,48 @@ export class CheckoutSession {
     msg: Extract<SessionInboundMessage, { type: "checkout_pr_status_request" }>,
   ): Promise<void> {
     const { cwd, requestId } = msg;
+    const resolvedCwd = expandTilde(cwd);
+
+    // A PR status request is automatic Git activity: clients re-issue it on
+    // mount, on focus and on reconnect, and the snapshot it wants is exactly
+    // the Git+forge read a manual policy withholds. Gate before BOTH the read
+    // and the error path — the error fallback resolves the forge, which is its
+    // own I/O, so reaching it at all would defeat the gate.
+    if (this.gitActivity && !this.gitActivity.isAutomatic(resolvedCwd)) {
+      const cached = this.workspaceGitService.peekSnapshot(resolvedCwd);
+      if (cached) {
+        this.host.emit({
+          type: "checkout_pr_status_response",
+          payload: buildCheckoutPrStatusPayloadFromSnapshot({
+            cwd,
+            requestId,
+            snapshot: cached,
+          }),
+        });
+        return;
+      }
+      // No cache: the same parseable envelope the status request returns. Old
+      // clients understand this shape; it is never a "no PR" fact.
+      this.host.emit({
+        type: "checkout_pr_status_response",
+        payload: {
+          cwd,
+          status: null,
+          githubFeaturesEnabled: true,
+          authState: "no_remote",
+          forge: "github",
+          error: {
+            code: "NOT_ALLOWED",
+            message: GIT_ACTIVITY_PAUSED_MESSAGE,
+          },
+          requestId,
+        },
+      });
+      return;
+    }
 
     try {
-      const snapshot = await this.workspaceGitService.getSnapshot(cwd);
+      const snapshot = await this.workspaceGitService.getSnapshot(resolvedCwd);
       this.host.emit({
         type: "checkout_pr_status_response",
         payload: buildCheckoutPrStatusPayloadFromSnapshot({
@@ -1145,7 +1315,7 @@ export class CheckoutSession {
         }),
       });
     } catch (error) {
-      const { forge, authState } = await this.resolveForgeContextForError(cwd, error);
+      const { forge, authState } = await this.resolveForgeContextForError(resolvedCwd, error);
       this.host.emit({
         type: "checkout_pr_status_response",
         payload: {

@@ -10,6 +10,7 @@ import {
   createNoGitWorkspaceRuntimeSnapshot,
   createNoopWorkspaceGitService,
 } from "../../test-utils/workspace-git-service-stub.js";
+import type { WorkspaceGitRuntimeSnapshot } from "../../workspace-git-service.js";
 import {
   FileBackedProjectRegistry,
   FileBackedWorkspaceRegistry,
@@ -143,6 +144,83 @@ test("fresh non-git directory creates a directory workspace at the exact path", 
   const workspace = await provisioning.findOrCreateWorkspaceForDirectory(dir);
 
   expect(workspace.cwd).toBe(dir);
+});
+
+function cachedGitSnapshot(cwd: string): WorkspaceGitRuntimeSnapshot {
+  const base = createNoGitWorkspaceRuntimeSnapshot(cwd);
+  return {
+    ...base,
+    git: {
+      ...base.git,
+      isGit: true,
+      repoRoot: cwd,
+      currentBranch: "cached-branch",
+      remoteUrl: "https://github.com/acme/cached.git",
+      hasRemote: true,
+    },
+  };
+}
+
+test("creating a directory workspace reuses a cached git snapshot instead of reading checkout", async () => {
+  const repo = path.join(tmpDir, "repo");
+  const snapshot = cachedGitSnapshot(repo);
+  let checkoutReads = 0;
+  const snapshotProvisioning = createWorkspaceProvisioningService({
+    workspaceRegistry,
+    projectRegistry,
+    logger,
+    workspaceGitService: createNoopWorkspaceGitService({
+      peekSnapshot: (cwd) => (cwd === repo ? snapshot : null),
+      getCheckout: async (cwd) => {
+        checkoutReads += 1;
+        return gitService().getCheckout(cwd);
+      },
+    }),
+  });
+
+  const workspace = await snapshotProvisioning.createWorkspaceForDirectory(repo, "schedule run");
+
+  expect(checkoutReads).toBe(0);
+  expect(workspace).toMatchObject({
+    cwd: repo,
+    kind: "local_checkout",
+    branch: "cached-branch",
+    title: "schedule run",
+    worktreeRoot: repo,
+  });
+  expect(await projectRegistry.get(workspace.projectId)).toMatchObject({
+    rootPath: repo,
+    kind: "git",
+  });
+});
+
+test("creating a directory workspace reads checkout once when no snapshot is cached", async () => {
+  const repo = path.join(tmpDir, "repo");
+  gitRoots.add(repo);
+  gitBranches.set(repo, "live-branch");
+  let checkoutReads = 0;
+  const countingProvisioning = createWorkspaceProvisioningService({
+    workspaceRegistry,
+    projectRegistry,
+    logger,
+    workspaceGitService: createNoopWorkspaceGitService({
+      peekSnapshot: () => null,
+      getCheckout: async (cwd) => {
+        checkoutReads += 1;
+        return gitService().getCheckout(cwd);
+      },
+    }),
+  });
+
+  const workspace = await countingProvisioning.createWorkspaceForDirectory(repo, "schedule run");
+
+  expect(checkoutReads).toBe(1);
+  expect(workspace).toMatchObject({
+    cwd: repo,
+    kind: "local_checkout",
+    branch: "live-branch",
+    title: "schedule run",
+  });
 });
 
 test("re-opening an active workspace by exact path returns the same record without duplicating", async () => {

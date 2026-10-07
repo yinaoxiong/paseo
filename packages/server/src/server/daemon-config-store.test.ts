@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { DaemonConfigStore, applyMutableProviderConfigToOverrides } from "./daemon-config-store.js";
 import { loadPersistedConfig } from "./persisted-config.js";
 import type { PersistedConfig } from "./persisted-config.js";
-import type { MutableDaemonConfig } from "@getpaseo/protocol/messages";
+import type { GitActivityPolicy, MutableDaemonConfig } from "@getpaseo/protocol/messages";
 
 function reloadableConfig(
   persisted: PersistedConfig,
@@ -31,7 +31,9 @@ function reloadableConfig(
     agentProfiles: daemon.agentProfiles,
     cors: { allowedOrigins: [] },
     trustedProxies: ["loopback"],
+    // `policy` is copied verbatim so an absent value stays absent.
     git: {
+      ...git,
       maxProcessesPerSecond: git.maxProcessesPerSecond ?? 64,
       maxProcessConcurrency: git.maxProcessConcurrency ?? 8,
     },
@@ -1191,5 +1193,118 @@ describe("DaemonConfigStore reload", () => {
       restartRequiredPaths: [],
       overrideControlledPaths: [],
     });
+  });
+});
+
+describe("DaemonConfigStore Git activity policy", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tempDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function createStore(
+    initialGit?: { policy?: GitActivityPolicy },
+    persistedGit?: { policy?: GitActivityPolicy },
+  ) {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-git-policy-"));
+    tempDirs.push(paseoHome);
+    // Seed the persisted file with the process limits so a policy patch can be
+    // proven to leave them alone instead of silently starting from empty.
+    writeFileSync(
+      path.join(paseoHome, "config.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          daemon: {
+            git: {
+              maxProcessesPerSecond: 5,
+              maxProcessConcurrency: 2,
+              ...persistedGit,
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    const store = new DaemonConfigStore(paseoHome, {
+      relay: { enabled: false },
+      mcp: { injectIntoAgents: false },
+      browserTools: { enabled: false },
+      git: {
+        maxProcessesPerSecond: 5,
+        maxProcessConcurrency: 2,
+        ...initialGit,
+      },
+      providers: {},
+      metadataGeneration: { providers: [] },
+      autoArchiveAfterMerge: false,
+      enableTerminalAgentHooks: false,
+      appendSystemPrompt: "",
+    });
+    return { paseoHome, store };
+  }
+
+  test("a policy-only patch preserves the process limits and unrelated config", () => {
+    const { paseoHome, store } = createStore();
+    const changes: unknown[] = [];
+    store.onFieldChange("git.policy", (value) => changes.push(value));
+
+    store.patch({ git: { policy: "manual" } });
+
+    expect(changes).toEqual(["manual"]);
+    expect(store.get().git).toEqual({
+      maxProcessesPerSecond: 5,
+      maxProcessConcurrency: 2,
+      policy: "manual",
+    });
+    expect(store.get().appendSystemPrompt).toBe("");
+    expect(loadPersistedConfig(paseoHome).daemon?.git).toEqual({
+      maxProcessesPerSecond: 5,
+      maxProcessConcurrency: 2,
+      policy: "manual",
+    });
+  });
+
+  test("an unrelated patch does not clobber the persisted policy", () => {
+    const { paseoHome, store } = createStore({ policy: "enabled" }, { policy: "enabled" });
+
+    store.patch({ appendSystemPrompt: "be terse" });
+
+    expect(loadPersistedConfig(paseoHome).daemon?.git?.policy).toBe("enabled");
+    expect(store.get().git?.policy).toBe("enabled");
+  });
+
+  test("reload applies a policy edit from disk instead of requiring a restart", () => {
+    const { paseoHome, store, persisted } = (() => {
+      const created = createStore();
+      return { ...created, persisted: loadPersistedConfig(created.paseoHome) };
+    })();
+    writeFileSync(
+      path.join(paseoHome, "config.json"),
+      `${JSON.stringify(
+        { ...persisted, daemon: { ...persisted.daemon, git: { policy: "manual" } } },
+        null,
+        2,
+      )}\n`,
+    );
+    const store2 = new DaemonConfigStore(paseoHome, store.get(), undefined, {
+      startupPersisted: persisted,
+      reloadSource: {
+        resolve: (nextPersisted) => ({
+          mutable: reloadableConfig(nextPersisted),
+          overrideControlledPaths: [],
+        }),
+      },
+    });
+
+    const result = store2.reload();
+
+    expect(result.appliedPaths).toContain("daemon.git.policy");
+    expect(result.restartRequiredPaths).not.toContain("daemon.git.policy");
+    expect(store2.get().git?.policy).toBe("manual");
   });
 });

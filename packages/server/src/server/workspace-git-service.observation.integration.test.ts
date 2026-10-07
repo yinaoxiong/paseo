@@ -1,5 +1,13 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -414,7 +422,6 @@ test("recursive observation updates tracked state and prunes ignored storms", as
   expect(getCheckoutDiff).not.toHaveBeenCalled();
   expect(service.getMetrics().workspaceRefreshQueuedCount).toBe(0);
 }, 30_000);
-
 test("a late Git-ignored tree is pruned while tracked changes still notify consumers", async () => {
   const tempDir = realpathSync(mkdtempSync(path.join(tmpdir(), "paseo-real-ignore-")));
   const repoDir = path.join(tempDir, "repo");
@@ -501,3 +508,110 @@ test("a late Git-ignored tree is pruned while tracked changes still notify consu
     rmSync(tempDir, { recursive: true, force: true });
   }
 }, 15_000);
+
+test("a symlinked checkout root routes real-path watcher events", async () => {
+  const tempDir = realpathSync(mkdtempSync(path.join(tmpdir(), "paseo-git-observation-symlink-")));
+  const repoDir = path.join(tempDir, "repo");
+  const aliasDir = path.join(tempDir, "repo-alias");
+  const trackedPath = path.join(repoDir, "tracked.txt");
+  mkdirSync(repoDir, { recursive: true });
+  writeFileSync(trackedPath, "base\n");
+  // The workspace is reached through a symlink; inotify reports the real path.
+  symlinkSync(repoDir, aliasDir, "dir");
+
+  const observer = createFileObserver();
+  const deliveredEvents: Array<{ directory: string; events: FileChange[] }> = [];
+  const subscribe: SubscribeToFileChanges = async (directory, callback, options) => {
+    const subscription = await observer.subscribe(
+      directory,
+      (error, events) => {
+        deliveredEvents.push({ directory, events });
+        callback(error, events);
+      },
+      options,
+    );
+    return subscription;
+  };
+  const fileObserver = {
+    subscribe,
+    getDiagnostics: () => observer.getDiagnostics(),
+    close: () => observer.close(),
+  };
+  const getCheckoutStatus = vi.fn(async (cwd: string) => ({
+    ...createStatus(cwd),
+    isDirty: readFileSync(trackedPath, "utf8") !== "base\n",
+  }));
+  const getCheckoutShortstat = vi.fn(async () => ({ additions: 1, deletions: 0 }));
+  const getCheckoutWorktreeState = vi.fn(async () => ({
+    isDirty: true,
+    diffStat: { additions: 1, deletions: 0 },
+  }));
+  const runGitCommand = vi.fn(async (args: string[]) => {
+    if (args[0] === "rev-parse") {
+      return {
+        stdout: `${repoDir}\n`,
+        stderr: "",
+        truncated: false,
+        exitCode: 0,
+        signal: null,
+      };
+    }
+    if (args[0] === "ls-files") {
+      return { stdout: "", stderr: "", truncated: false, exitCode: 0, signal: null };
+    }
+    throw new Error(`Unexpected Git command: ${args.join(" ")}`);
+  });
+  const service = new WorkspaceGitServiceImpl({
+    logger: createLogger(),
+    paseoHome: path.join(tempDir, "paseo-home"),
+    fileObserver,
+    deps: {
+      getCheckoutSnapshotFacts: vi.fn(async (cwd: string) =>
+        createFacts(cwd === aliasDir ? repoDir : cwd),
+      ),
+      getCheckoutStatus,
+      getCheckoutShortstat,
+      getCheckoutWorktreeState,
+      runGitCommand,
+    } as never,
+  });
+  const listener = vi.fn();
+  const subscription = service.registerWorkspace({ cwd: aliasDir }, listener);
+
+  cleanup.push(async () => {
+    subscription.unsubscribe();
+    await service.dispose();
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  await vi.waitFor(
+    () => {
+      expect(service.peekSnapshot(aliasDir)).not.toBeNull();
+      expect(service.getMetrics()).toMatchObject({
+        workspaceObservationSetupInFlightCount: 0,
+        workspaceRefreshInFlightCount: 0,
+      });
+    },
+    { timeout: 5_000 },
+  );
+  getCheckoutStatus.mockClear();
+
+  // The observer watches the real directory, so events arrive under repoDir
+  // while the workspace is registered under the symlink. The refresh must still
+  // reach the symlinked workspace: matching is lexical against aliases, not a
+  // synchronous realpath of the event path.
+  writeFileSync(trackedPath, "base\nchanged\n");
+  await vi.waitFor(
+    () => {
+      expect(getCalledCwds(getCheckoutStatus)).toEqual([aliasDir]);
+    },
+    { timeout: 5_000 },
+  );
+  expect(deliveredEvents.some((batch) => batch.events.some((e) => e.path === trackedPath))).toBe(
+    true,
+  );
+}, 30_000);
+
+function getCalledCwds(mock: ReturnType<typeof vi.fn>): string[] {
+  return mock.mock.calls.map(([cwd]) => cwd as string);
+}

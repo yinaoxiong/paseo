@@ -7,9 +7,17 @@ import type {
   WorkspaceGitRuntimeSnapshot,
   WorkspaceGitSubscription,
 } from "../workspace-git-service.js";
+import type { GitActivityPolicyService } from "../git-activity/policy.js";
 
 export interface AutoArchiveOnMergeOptions extends AutoArchiveArchiveOptions {
   logger: Logger;
+  /**
+   * Host-global Git activity admission. Auto-archive consumes automatic Git/PR
+   * observation, so a workspace that is not admitted is never auto-archived:
+   * acting on a cached snapshot the policy stopped refreshing would archive from
+   * stale state. Explicit archive still runs its own safety checks.
+   */
+  gitActivity?: GitActivityPolicyService;
 }
 
 export interface AutoArchiveOnMergeDependencies {
@@ -37,6 +45,12 @@ export function setupAutoArchiveOnMerge(
   return options.workspaceGitService.onSnapshotUpdated((snapshot) => {
     const snapshotCwd = deps.resolvePath(snapshot.cwd);
     if (options.daemonConfigStore.get().autoArchiveAfterMerge !== true) {
+      openPullRequestUrlsByCwd.delete(snapshotCwd);
+      return;
+    }
+    // Never archive from a snapshot the policy is no longer keeping fresh. Drop
+    // the latch so a later re-enable cannot fire on this stale pair either.
+    if (options.gitActivity && !options.gitActivity.isAutomatic(snapshotCwd)) {
       openPullRequestUrlsByCwd.delete(snapshotCwd);
       return;
     }

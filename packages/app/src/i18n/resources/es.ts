@@ -972,6 +972,10 @@ export const es: TranslationResources = {
         refresh: "Refrescar",
         refreshState: "Actualizar el estado de git y {{brand}}",
         failedRefresh: "No se pudo actualizar el estado de git.",
+        manualRefreshHostUpdate:
+          "Actualiza el host para actualizar los cambios de Git en modo manual.",
+        manualRefreshRequired:
+          "Las actualizaciones automáticas de Git están en pausa. Actualiza para leer estas diferencias.",
         seeUncommittedChanges: "Ver cambios no confirmados",
         seeCommittedChanges: "Ver cambios confirmados",
         checkingRepository: "Comprobando repositorio...",

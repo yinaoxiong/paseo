@@ -5,6 +5,7 @@ import type {
   WorkspaceGitRuntimeSnapshot,
   WorkspaceGitService,
 } from "../../workspace-git-service.js";
+import type { GitActivityPolicyService } from "../../git-activity/policy.js";
 
 interface WorkspaceGitWatchTarget {
   workspaceIds: Set<string>;
@@ -48,7 +49,7 @@ export interface WorkspaceGitObserverService {
 }
 
 export function createWorkspaceGitObserverService(deps: {
-  workspaceGitService: Pick<WorkspaceGitService, "registerWorkspace">;
+  workspaceGitService: Pick<WorkspaceGitService, "registerWorkspace" | "onGitActivityStateChanged">;
   emitWorkspaceUpdateForCwd: (cwd: string) => Promise<void>;
   emitStatusUpdate: (cwd: string, snapshot: WorkspaceGitRuntimeSnapshot) => void;
   onBranchChanged?: (
@@ -57,6 +58,11 @@ export function createWorkspaceGitObserverService(deps: {
     newBranch: string | null,
   ) => void;
   logger: pino.Logger;
+  /**
+   * Host-global Git activity admission. Without it every workspace is observed,
+   * which is the pre-policy behaviour the daemon must not keep.
+   */
+  gitActivity?: GitActivityPolicyService;
 }): WorkspaceGitObserverService {
   const {
     workspaceGitService,
@@ -64,11 +70,22 @@ export function createWorkspaceGitObserverService(deps: {
     emitStatusUpdate,
     onBranchChanged,
     logger,
+    gitActivity,
   } = deps;
 
   const watchTargets = new Map<string, WorkspaceGitWatchTarget>();
   const workspaceStates = new Map<string, WorkspaceGitWatchState>();
   const subscriptions = new Map<string, () => void>();
+  /**
+   * The descriptors last presented to `syncObservers`.
+   *
+   * A workspace the policy refuses is dropped, and nothing would otherwise ask
+   * again: `fetch_workspaces` is a client request, not a policy event. Keeping
+   * the last set lets a self-driven admission change — an `auto`
+   * classification landing — re-run the same sync that dropped it.
+   */
+  const lastSyncedDescriptors = new Map<string, WorkspaceDescriptorPayload>();
+  const unsubscribers: Array<() => void> = [];
 
   function rememberDescriptorState(
     workspaceId: string,
@@ -128,8 +145,60 @@ export function createWorkspaceGitObserverService(deps: {
     }
   }
 
+  const undecidedClassificationRequests = new Map<string, Promise<void>>();
+
+  /**
+   * Ask the policy service to settle a workspace whose storage is not yet
+   * classified. Bounded to one in-flight request per path, and never awaited
+   * here: classification reads the mount table rather than the workspace tree,
+   * but it is still asynchronous work, so awaiting it would put another caller's
+   * timing on this path.
+   */
+  function requestClassificationWhenUndecided(normalizedCwd: string): void {
+    if (!gitActivity) {
+      return;
+    }
+    if (undecidedClassificationRequests.has(normalizedCwd)) {
+      return;
+    }
+    const state = gitActivity.peek(normalizedCwd);
+    // `manual` is a decision; only an undetermined verdict can still change.
+    if (state.effectiveMode !== "unknown") {
+      return;
+    }
+    const pending = gitActivity
+      .ensureClassification(normalizedCwd)
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        logger.warn(
+          { err: error, cwd: normalizedCwd },
+          "Filesystem classification failed; workspace stays manual",
+        );
+      })
+      .finally(() => {
+        if (undecidedClassificationRequests.get(normalizedCwd) === pending) {
+          undecidedClassificationRequests.delete(normalizedCwd);
+        }
+      });
+    undecidedClassificationRequests.set(normalizedCwd, pending);
+  }
+
   function syncObserver(cwd: string, options: { isGit: boolean; workspaceId: string }): void {
     const normalizedCwd = resolve(cwd);
+    // Registering a workspace installs watchers, fetch and polls: that is exactly
+    // what a manual policy forbids. Identity and cached state stay intact, so the
+    // workspace still renders and an explicit refresh still works.
+    if (gitActivity && !gitActivity.isAutomatic(normalizedCwd)) {
+      removeForWorkspaceId(options.workspaceId);
+      // "Not automatic" covers two very different states: a host decision, and
+      // a workspace that simply has not been classified yet. Under `auto` the
+      // second one is the normal case on first sight, and nothing else would
+      // ever ask for the real answer -- `fetch_workspaces` is a client request,
+      // not a policy event. Kick the bounded classification off here; when it
+      // lands, the state-change subscription below re-runs this sync.
+      requestClassificationWhenUndecided(normalizedCwd);
+      return;
+    }
     const currentState = workspaceStates.get(options.workspaceId);
     if (currentState && currentState.cwd !== normalizedCwd) {
       removeForWorkspaceId(options.workspaceId);
@@ -175,15 +244,40 @@ export function createWorkspaceGitObserverService(deps: {
   }
 
   function syncObservers(workspaces: Iterable<WorkspaceDescriptorPayload>): void {
+    const present = new Set<string>();
     for (const workspace of workspaces) {
+      present.add(workspace.id);
+      lastSyncedDescriptors.set(workspace.id, workspace);
       syncObserver(workspace.workspaceDirectory, {
         isGit: workspace.workspaceKind !== "directory",
         workspaceId: workspace.id,
       });
       rememberDescriptorState(workspace.id, workspace);
     }
+    for (const workspaceId of Array.from(lastSyncedDescriptors.keys())) {
+      if (!present.has(workspaceId)) {
+        lastSyncedDescriptors.delete(workspaceId);
+      }
+    }
   }
 
+  // A classification landing is a policy event with no client request behind
+  // it. Re-run the sync that dropped the workspace so verified-local storage
+  // actually starts being observed.
+  const stateChangeSubscription = workspaceGitService.onGitActivityStateChanged((cwd) => {
+    const normalizedCwd = resolve(cwd);
+    const affected = Array.from(lastSyncedDescriptors.values()).filter(
+      (workspace) => resolve(workspace.workspaceDirectory) === normalizedCwd,
+    );
+    if (affected.length === 0) {
+      return;
+    }
+    // Re-running the sync is what starts observation; the workspace
+    // projection is re-broadcast by the session's own listener, so this does
+    // not also emit.
+    syncObservers(affected);
+  });
+  unsubscribers.push(() => stateChangeSubscription.unsubscribe());
   return {
     reconcileObservers(workspaces) {
       const retained = new Map([...workspaces].map((workspace) => [workspace.id, workspace]));
@@ -222,12 +316,17 @@ export function createWorkspaceGitObserverService(deps: {
     removeForWorkspaceId,
 
     dispose() {
+      for (const unsubscribe of unsubscribers.splice(0)) {
+        unsubscribe();
+      }
       for (const unsubscribe of subscriptions.values()) {
         unsubscribe();
       }
       subscriptions.clear();
       watchTargets.clear();
       workspaceStates.clear();
+      lastSyncedDescriptors.clear();
+      undecidedClassificationRequests.clear();
     },
   };
 }

@@ -44,11 +44,17 @@ import {
 import { parseGitRevParsePath } from "../utils/git-rev-parse-path.js";
 import {
   createRealpathAwarePathMatcher,
-  getRealpathAwareRelativePath,
   isPathInsideRoot,
-  isRealpathInsideRoot,
   looksLikeDefiniteWindowsPath,
 } from "../utils/path.js";
+import {
+  type ObservationPathRoot,
+  type ResolveObservationRootAliases,
+  createObservationPathRoot,
+  createRebasedRoot,
+  defaultResolveObservationRootAliases,
+  isInsideRoot,
+} from "./workspace-git-observation-paths.js";
 import {
   createRunGitCommand,
   runGitCommand,
@@ -77,13 +83,14 @@ import {
 } from "./file-observer/index.js";
 import { checkoutLiteFromGitSnapshot } from "./workspace-registry-model.js";
 import { createWatcherLivenessCanary } from "./watcher-liveness-canary.js";
+import type { GitActivityPolicyService } from "./git-activity/policy.js";
 
 const WORKSPACE_GIT_WATCH_DEBOUNCE_MS = 1_000;
 const BACKGROUND_GIT_FETCH_INTERVAL_MS = 180_000;
 const FETCH_METADATA_ECHO_TTL_MS = 5_000;
 export const WORKSPACE_GIT_OBSERVATION_REENSURE_INTERVAL_MS = 60_000;
 const FORGE_PR_STATUS_POLL_FAST_INTERVAL_MS = 20_000;
-const FORGE_PR_STATUS_POLL_SLOW_INTERVAL_MS = 120_000;
+export const FORGE_PR_STATUS_POLL_SLOW_INTERVAL_MS = 120_000;
 const FORGE_PR_STATUS_POLL_ERROR_BACKOFF_CAP_MS = 300_000;
 const DEGRADED_GIT_POLL_INTERVAL_MS = 5_000;
 // Degraded polling shells out a full Git refresh per tick, and the repositories that defeat the
@@ -209,6 +216,12 @@ export interface WorkspaceGitService {
   ): WorkspaceGitSubscription;
 
   onSnapshotUpdated(listener: WorkspaceGitSnapshotUpdatedListener): WorkspaceGitSubscription;
+  /**
+   * Subscribe to self-driven effective-mode changes: an `auto` classification
+   * landing, not a host policy edit. Used to re-broadcast the workspace
+   * projection so a workspace is not left showing "undetermined" forever.
+   */
+  onGitActivityStateChanged(listener: (cwd: string) => void): WorkspaceGitSubscription;
   peekSnapshot(cwd: string): WorkspaceGitRuntimeSnapshot | null;
   getCheckout(cwd: string): Promise<ProjectCheckoutLitePayload>;
   getSnapshot(
@@ -389,6 +402,12 @@ interface WorkspaceGitServiceDependencies {
   runGitCommand: typeof runGitCommand;
   getWorkspaceGitSelfHealPhaseMs: typeof getWorkspaceGitObservationReensurePhaseMs;
   createWatcherLivenessCanary: typeof createWatcherLivenessCanary;
+  /**
+   * Resolves a watch root's realpath aliases on the libuv pool. Event delivery
+   * only ever uses the aliases this returned, so a mount that never answers
+   * costs one bounded setup read instead of one blocking read per event.
+   */
+  resolveObservationRootAliases: ResolveObservationRootAliases;
   now: () => Date;
 }
 
@@ -398,6 +417,12 @@ interface WorkspaceGitServiceOptions {
   worktreesRoot?: string;
   fileObserver?: FileObserver;
   deps?: Partial<WorkspaceGitServiceDependencies>;
+  /**
+   * Host-global Git activity admission. A daemon always supplies one, so every
+   * automatic source below is gated; it stays optional so existing unit
+   * constructs keep working, and then read as "nothing injected".
+   */
+  gitActivity?: GitActivityPolicyService;
 }
 
 class WorkspaceGitServiceDisposedError extends Error {
@@ -437,6 +462,11 @@ interface WorkspaceGitTarget {
   latestFingerprint: string | null;
   lastShellOutAtMs: number | null;
   repoGitRoot: string | null;
+  /**
+   * Realpath aliases for `repoGitRoot`, resolved before the repository target is
+   * registered so event routing never needs a synchronous filesystem read.
+   */
+  repoRootAliases: readonly string[] | null;
   observationSetupPromise: Promise<void> | null;
   observationSetupComplete: boolean;
   closed: boolean;
@@ -444,6 +474,13 @@ interface WorkspaceGitTarget {
 
 interface RepoGitTarget {
   repoGitRoot: string;
+  /**
+   * Pre-resolved spellings of `repoGitRoot`, plus the spellings of every
+   * workspace's private git dir that shares this repository.
+   */
+  repoRoot: ObservationPathRoot;
+  /** Private git dirs of the workspaces sharing this repository, alias-aware. */
+  gitDirRoots: Map<string, ObservationPathRoot>;
   cwd: string;
   workspaceKeys: Set<string>;
   subscription: FileObserverSubscription | null;
@@ -472,6 +509,11 @@ interface RepoMetadataWorkspaceRefresh {
 interface WorkingTreeWatchTarget {
   cwd: string;
   watchPath: string;
+  /**
+   * Pre-resolved spellings of `watchPath`. Event filtering is lexical against
+   * this root; nothing downstream of a watcher callback may stat the path.
+   */
+  watchRoot: ObservationPathRoot;
   repoRoot: string | null;
   subscription: FileObserverSubscription | null;
   ignoredDirectories: Set<string>;
@@ -483,6 +525,7 @@ interface WorkingTreeWatchTarget {
   // comparing against this field instead of the last-computed value keeps a
   // skipped update from latching forever.
   appliedIgnoreList: string[];
+  ignoredRoots: ObservationPathRoot[];
   ignoredDirectoriesRefreshPromise: Promise<void> | null;
   ignoredDirectoriesRefreshRequested: boolean;
   // Bounded two ways so a long-lived daemon over a churning tree cannot grow
@@ -572,6 +615,7 @@ function buildDefaultWorkspaceGitServiceDeps(
     runGitCommand,
     getWorkspaceGitSelfHealPhaseMs: getWorkspaceGitObservationReensurePhaseMs,
     createWatcherLivenessCanary,
+    resolveObservationRootAliases: defaultResolveObservationRootAliases,
     now: () => new Date(),
   };
 }
@@ -634,10 +678,31 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   >({ max: WORKSPACE_GIT_AUXILIARY_CACHE_MAX });
   private readonly checkoutDiffCache = new CheckoutDiffCache(() => this.deps.now().getTime());
   private watcherErrorCallbackCount = 0;
+  private readonly gitActivity: GitActivityPolicyService | undefined;
+  /**
+   * In-flight `auto` classifications, keyed by cwd. Bounded at one per
+   * workspace: a repeated registration collapses onto the pending classification
+   * rather than starting another filesystem inspection.
+   */
+  private readonly pendingClassifications = new Map<string, Promise<void>>();
+  /**
+   * Notified when a workspace's effective Git activity mode changes on its own
+   * -- a classification landing, not a host policy edit. The session uses this
+   * to re-broadcast the projection, so the UI stops showing "undetermined" for
+   * a workspace the daemon has since verified as local.
+   */
+  private readonly gitActivityStateListeners = new Set<(cwd: string) => void>();
+  /**
+   * Bumped on every policy transition. Async work captures the generation it
+   * started under and re-checks it after each await, so teardown that finishes
+   * late cannot write back stale state or re-open a watcher.
+   */
+  private admissionGeneration = 0;
   constructor(options: WorkspaceGitServiceOptions) {
     this.logger = options.logger.child({ module: "workspace-git-service" });
     this.paseoHome = options.paseoHome;
     this.worktreesRoot = options.worktreesRoot;
+    this.gitActivity = options.gitActivity;
     this.fileObserver = options.fileObserver ?? createFileObserver();
     this.deps = resolveWorkspaceGitServiceDeps(
       this.fileObserver.subscribe.bind(this.fileObserver),
@@ -646,6 +711,131 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     this.forgeResolver = createForgeResolver({
       createService: (forge) => this.deps.forgeOverrides?.[forge] ?? createForgeService(forge),
     });
+  }
+
+  /**
+   * True when background Git work may run for this workspace. Absent policy
+   * means "no policy injected", which preserves the legacy behaviour for unit
+   * constructs rather than silently disabling the daemon.
+   */
+  private isAutomaticAllowed(cwd: string): boolean {
+    return this.gitActivity ? this.gitActivity.isAutomatic(cwd) : true;
+  }
+
+  /** Generation token for async work that must not outlive a policy transition. */
+  private captureAdmissionGeneration(): number {
+    return this.admissionGeneration;
+  }
+
+  private isAdmissionCurrent(generation: number): boolean {
+    return this.admissionGeneration === generation;
+  }
+
+  /**
+   * Applies a policy transition synchronously: admission flips before any async
+   * teardown starts, so new automatic work is refused immediately even while
+   * old watchers are still closing.
+   *
+   * Returns the workspaces whose automatic observation must now stop (or, on
+   * enable, restart) so the caller can drive it without re-probing policy.
+   */
+  applyGitActivityPolicy(): { stopped: string[]; restarted: string[] } {
+    this.admissionGeneration += 1;
+    if (!this.gitActivity) {
+      return { stopped: [], restarted: [] };
+    }
+
+    const stopped: string[] = [];
+    const restarted: string[] = [];
+    for (const target of this.workspaceTargets.values()) {
+      if (this.isAutomaticAllowed(target.cwd)) {
+        continue;
+      }
+      stopped.push(target.cwd);
+      this.stopAutomaticObservation(target);
+    }
+    for (const target of this.workingTreeWatchTargets.values()) {
+      if (this.isAutomaticAllowed(target.cwd)) {
+        continue;
+      }
+      stopped.push(target.cwd);
+      this.closeWorkingTreeWatchTarget(target);
+      this.workingTreeWatchTargets.delete(target.cwd);
+    }
+    for (const repoTarget of Array.from(this.repoTargets.values())) {
+      if (repoTarget.workspaceKeys.size === 0) {
+        this.closeRepoTarget(repoTarget);
+        continue;
+      }
+      // A shared repository stays open while any workspace on it is still
+      // admitted: closing it for one manual workspace would break a local
+      // workspace that shares the same repo.
+      const stillAdmitted = Array.from(repoTarget.workspaceKeys).some((cwd) =>
+        this.isAutomaticAllowed(cwd),
+      );
+      if (stillAdmitted) {
+        continue;
+      }
+      this.closeRepoTarget(repoTarget);
+      stopped.push(repoTarget.repoGitRoot);
+    }
+    for (const repoGitRoot of Array.from(this.repoTargets.keys())) {
+      if (!this.repoTargets.get(repoGitRoot)?.closed) {
+        continue;
+      }
+      this.repoTargets.delete(repoGitRoot);
+    }
+
+    // Re-enable rebuilds observation once for workspaces that are still
+    // subscribed. Nothing is started for workspaces nobody is watching.
+    for (const target of this.workspaceTargets.values()) {
+      if (target.closed || target.listeners.size === 0) {
+        continue;
+      }
+      if (!this.isAutomaticAllowed(target.cwd)) {
+        continue;
+      }
+      if (target.observationSetupComplete) {
+        continue;
+      }
+      restarted.push(target.cwd);
+      target.observationSetupPromise = null;
+      this.scheduleWorkspaceObservationSetup(target);
+    }
+
+    return { stopped, restarted };
+  }
+
+  /**
+   * Drops every automatic timer, watcher and poll for one workspace without
+   * touching its identity or cached snapshot. The workspace target stays
+   * registered so an explicit user refresh can still read and return Git state.
+   */
+  private stopAutomaticObservation(target: WorkspaceGitTarget): void {
+    if (target.debounceTimer) {
+      clearTimeout(target.debounceTimer);
+      target.debounceTimer = null;
+    }
+    target.pendingDebounceRequest = null;
+    if (target.observationReensureTimer) {
+      clearTimeout(target.observationReensureTimer);
+      target.observationReensureTimer = null;
+    }
+    this.stopForgePrStatusPollForTarget(target);
+    if (target.workingTreeWatchTarget) {
+      this.removeWorkspaceWorkingTreeLink(target.workingTreeWatchTarget, target.cwd);
+      target.workingTreeWatchTarget = null;
+    }
+    if (target.repoGitRoot) {
+      const repoTarget = this.repoTargets.get(target.repoGitRoot);
+      repoTarget?.workspaceKeys.delete(target.cwd);
+      if (repoTarget && repoTarget.workspaceKeys.size === 0) {
+        this.closeRepoTarget(repoTarget);
+        this.repoTargets.delete(target.repoGitRoot);
+      }
+    }
+    target.observationSetupComplete = false;
+    target.observationSetupPromise = null;
   }
 
   resolveForge(cwd: string): Promise<ForgeResolution | null> {
@@ -661,13 +851,25 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     const cwd = resolve(params.cwd);
     const target = this.ensureWorkspaceTarget(cwd);
     target.listeners.add(listener);
-    if (target.listeners.size === 1) {
+    // Admission is read before any timer, snapshot or watcher is created: a
+    // manual workspace gets a listener and nothing else.
+    const automatic = this.isAutomaticAllowed(cwd);
+    if (automatic && target.listeners.size === 1) {
       this.startWorkspaceSubscriptionTimers(target);
     }
-    if (!target.latestSnapshot) {
+    if (automatic && !target.latestSnapshot) {
       this.scheduleInitialWorkspaceRefresh(target);
     }
-    this.scheduleWorkspaceObservationSetup(target);
+    if (automatic) {
+      this.scheduleWorkspaceObservationSetup(target);
+    }
+    // Under `auto` an unclassified workspace reads `unknown`, which is manual.
+    // Nothing above can start work for it, and nothing else would ever ask for
+    // the real answer -- so classification is kicked off here, off the request
+    // path, and observation starts when it lands. Starting it immediately
+    // instead would put a possibly-stalled filesystem classification on the
+    // caller's critical path.
+    this.schedulePendingClassification(target);
 
     return {
       unsubscribe: () => {
@@ -676,12 +878,86 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     };
   }
 
+  /**
+   * Converge a not-yet-classified workspace under `auto`.
+   *
+   * Classification reads the mount table rather than the workspace tree, so
+   * awaiting it cannot block this caller on a stalled mount. Only the outcome is
+   * applied: if the workspace turns out to be verified local, the observation
+   * that was withheld at registration starts here, once.
+   */
+  private schedulePendingClassification(target: WorkspaceGitTarget): void {
+    if (!this.gitActivity) {
+      return;
+    }
+    if (this.pendingClassifications.has(target.cwd)) {
+      return;
+    }
+    const generation = this.captureAdmissionGeneration();
+    /**
+     * One promise per attempt: the value stored in the map is the value that
+     * releases it. Storing a derived promise and comparing against the
+     * un-derived one never matched, which left the map saying "already pending"
+     * forever and blocked every retry after an `unknown` verdict or a failed
+     * classification.
+     */
+    const attempt = (async (): Promise<void> => {
+      try {
+        const result = await this.gitActivity?.ensureClassification(target.cwd);
+        if (!result?.automatic) {
+          return;
+        }
+        if (this.disposed) {
+          return;
+        }
+        // A policy transition while this was in flight already decided the
+        // workspace's fate; `applyGitActivityPolicy` owns that restart.
+        if (!this.isAdmissionCurrent(generation)) {
+          return;
+        }
+        if (!this.isActiveObservedWorkspaceTarget(target)) {
+          return;
+        }
+        if (target.listeners.size === 1) {
+          this.startWorkspaceSubscriptionTimers(target);
+        }
+        if (!target.latestSnapshot) {
+          this.scheduleInitialWorkspaceRefresh(target);
+        }
+        this.scheduleWorkspaceObservationSetup(target);
+        this.gitActivityStateListeners.forEach((listener) => listener(target.cwd));
+      } catch (error) {
+        if (this.disposed) {
+          return;
+        }
+        this.logger.warn(
+          { err: error, cwd: target.cwd },
+          "Filesystem classification failed; workspace stays manual",
+        );
+      }
+    })();
+    const settled: Promise<void> = attempt.finally(() => {
+      this.pendingClassifications.delete(target.cwd);
+    });
+    this.pendingClassifications.set(target.cwd, settled);
+  }
+
   onSnapshotUpdated(listener: WorkspaceGitSnapshotUpdatedListener): WorkspaceGitSubscription {
     this.assertNotDisposed();
     this.snapshotUpdatedListeners.add(listener);
     return {
       unsubscribe: () => {
         this.snapshotUpdatedListeners.delete(listener);
+      },
+    };
+  }
+
+  onGitActivityStateChanged(listener: (cwd: string) => void): WorkspaceGitSubscription {
+    this.assertNotDisposed();
+    this.gitActivityStateListeners.add(listener);
+    return {
+      unsubscribe: () => {
+        this.gitActivityStateListeners.delete(listener);
       },
     };
   }
@@ -947,6 +1223,11 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     return snapshot.git.remoteUrl;
   }
 
+  /**
+   * Explicit refresh. It runs Git work even under a manual policy — the user
+   * asked for it — but it must never leave observation behind: no watcher,
+   * timer or poll is armed afterwards.
+   */
   async refresh(cwd: string, _options?: { priority?: "normal" | "high" }): Promise<void> {
     this.assertNotDisposed();
     cwd = resolve(cwd);
@@ -961,7 +1242,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       queueIfBusy: false,
       movedRemoteRefs: new Set(),
     });
-    this.scheduleWorkspaceObservationSetup(target);
+    if (this.isAutomaticAllowed(cwd)) {
+      this.scheduleWorkspaceObservationSetup(target);
+    }
   }
 
   async requestWorkingTreeWatch(
@@ -970,6 +1253,11 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   ): Promise<{ repoRoot: string | null; unsubscribe: () => void }> {
     this.assertNotDisposed();
     cwd = resolve(cwd);
+    // A working-tree watcher is automatic observation by definition. Manual and
+    // unknown workspaces never get one; callers fall back to one-shot reads.
+    if (!this.isAutomaticAllowed(cwd)) {
+      return { repoRoot: null, unsubscribe: () => {} };
+    }
     const target = await this.ensureWorkingTreeWatchTarget(cwd);
     target.listeners.add(onChange);
 
@@ -984,6 +1272,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   scheduleRefreshForCwd(cwd: string): void {
     this.assertNotDisposed();
     cwd = resolve(cwd);
+    if (!this.isAutomaticAllowed(cwd)) {
+      return;
+    }
     const target = this.workspaceTargets.get(cwd);
     if (target) {
       this.scheduleWorkspaceRefresh(target, { queueIfBusy: false });
@@ -993,6 +1284,10 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   onWorkspaceStateMayHaveChanged(cwd: string): void {
     this.assertNotDisposed();
     const normalizedCwd = resolve(cwd);
+    // An agent touching the tree is not the user asking for Git state.
+    if (!this.isAutomaticAllowed(normalizedCwd)) {
+      return;
+    }
     const target = this.workspaceTargets.get(normalizedCwd);
     if (!target || target.closed) {
       return;
@@ -1040,6 +1335,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     this.workingTreeWatchResolutions.clear();
     this.workingTreeWatchAliases.clear();
     this.snapshotUpdatedListeners.clear();
+    this.gitActivityStateListeners.clear();
+    this.pendingClassifications.clear();
     this.disposePromise = this.fileObserver.close();
     return this.disposePromise;
   }
@@ -1163,7 +1460,10 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       return target;
     }
 
-    const watchPath = repoRoot && createRealpathAwarePathMatcher(repoRoot)(cwd) ? cwd : targetCwd;
+    const repoWatchRoot = repoRoot
+      ? await this.ensureObservationRoot(repoRoot)
+      : createObservationPathRoot(targetCwd);
+    const watchPath = repoRoot && repoWatchRoot.matches(cwd) ? cwd : targetCwd;
     const setup = this.createWorkingTreeWatchTarget(targetCwd, watchPath, repoRoot).finally(() => {
       if (this.workingTreeWatchSetups.get(targetCwd) === setup) {
         this.workingTreeWatchSetups.delete(targetCwd);
@@ -1202,6 +1502,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       latestFingerprint: null,
       lastShellOutAtMs: null,
       repoGitRoot: null,
+      repoRootAliases: null,
       observationSetupPromise: null,
       observationSetupComplete: false,
       closed: false,
@@ -1212,8 +1513,13 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   private scheduleInitialWorkspaceRefresh(target: WorkspaceGitTarget): void {
+    const generation = this.captureAdmissionGeneration();
     queueMicrotask(() => {
       if (!this.isActiveObservedWorkspaceTarget(target) || target.latestSnapshot) {
+        return;
+      }
+      // The policy may have flipped to manual while this microtask was queued.
+      if (!this.isAdmissionCurrent(generation) || !this.isAutomaticAllowed(target.cwd)) {
         return;
       }
       void this.refreshWorkspaceTarget(target, {
@@ -1230,6 +1536,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   private scheduleWorkspaceObservationSetup(target: WorkspaceGitTarget): void {
+    if (!this.isAutomaticAllowed(target.cwd)) {
+      return;
+    }
     if (
       target.observationSetupComplete ||
       target.observationSetupPromise ||
@@ -1238,8 +1547,14 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       return;
     }
 
+    const generation = this.captureAdmissionGeneration();
     target.observationSetupPromise = this.workspaceObservationSetupLimit(async () => {
       if (!this.isActiveObservedWorkspaceTarget(target)) {
+        return;
+      }
+      // Disable is synchronous and precedes teardown; a setup queued before the
+      // transition must not install watchers after it.
+      if (!this.isAdmissionCurrent(generation) || !this.isAutomaticAllowed(target.cwd)) {
         return;
       }
       await this.setupWorkspaceObservation(target);
@@ -1259,14 +1574,22 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   private async setupWorkspaceObservation(target: WorkspaceGitTarget): Promise<void> {
+    const generation = this.captureAdmissionGeneration();
     const facts = await this.getFactsForObservation(target);
     if (!this.isActiveObservedWorkspaceTarget(target)) {
+      return;
+    }
+    if (!this.isAdmissionCurrent(generation) || !this.isAutomaticAllowed(target.cwd)) {
       return;
     }
     const watchCwd = facts.isGit ? facts.worktreeRoot : target.cwd;
     const workingTreeTargetPromise = this.ensureWorkingTreeWatchTarget(watchCwd);
     const workingTreeTarget = await workingTreeTargetPromise;
     if (!this.isActiveObservedWorkspaceTarget(target)) {
+      queueMicrotask(() => this.closeWorkingTreeWatchTargetIfUnused(workingTreeTarget));
+      return;
+    }
+    if (!this.isAdmissionCurrent(generation) || !this.isAutomaticAllowed(target.cwd)) {
       queueMicrotask(() => this.closeWorkingTreeWatchTargetIfUnused(workingTreeTarget));
       return;
     }
@@ -1288,9 +1611,26 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     if (!this.isActiveObservedWorkspaceTarget(target)) {
       return;
     }
+    if (!this.isAdmissionCurrent(generation) || !this.isAutomaticAllowed(target.cwd)) {
+      return;
+    }
     target.repoGitRoot = repoGitRoot;
+    target.repoRootAliases = await this.deps.resolveObservationRootAliases(repoGitRoot);
+    // Stop the setup here if every listener vanished while the alias read was in
+    // flight. ensureRepoTarget re-checks activity itself, so this is not a fix
+    // for a proven resurrection; it keeps the stale repo identity off a target
+    // that may be revived for a later subscriber, and skips work we know is dead.
+    if (!this.isActiveObservedWorkspaceTarget(target)) {
+      target.repoGitRoot = null;
+      target.repoRootAliases = null;
+      return;
+    }
     await this.ensureRepoTarget(target);
-    if (this.isActiveObservedWorkspaceTarget(target)) {
+    if (
+      this.isActiveObservedWorkspaceTarget(target) &&
+      this.isAdmissionCurrent(generation) &&
+      this.isAutomaticAllowed(target.cwd)
+    ) {
       target.observationSetupComplete = true;
     }
   }
@@ -1341,16 +1681,21 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     watchPath: string,
     repoRoot: string | null,
   ): Promise<WorkingTreeWatchTarget> {
+    const watchRoot = await this.ensureObservationRoot(watchPath);
     const ignoredDirectories = repoRoot
       ? (await this.loadIgnoredDirs(watchPath)).ignored
       : new Set<string>();
     const target: WorkingTreeWatchTarget = {
       cwd,
       watchPath,
+      watchRoot,
       repoRoot,
       subscription: null,
       ignoredDirectories,
       appliedIgnoreList: [],
+      ignoredRoots: Array.from(ignoredDirectories, (directory) =>
+        createRebasedRoot(directory, watchRoot),
+      ),
       ignoredDirectoriesRefreshPromise: null,
       ignoredDirectoriesRefreshRequested: false,
       knownDirectories: new Set(),
@@ -1486,9 +1831,19 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       }
     };
     try {
+      const generation = this.captureAdmissionGeneration();
       const subscription = await this.subscribeWithDeadline(
         target.watchPath,
         (error, events) => {
+          // Late deliveries from a watcher already closed by a policy
+          // transition must not trigger Git refreshes.
+          if (
+            target.closed ||
+            !this.isAdmissionCurrent(generation) ||
+            !this.isAutomaticAllowed(target.cwd)
+          ) {
+            return;
+          }
           if (error) {
             if (watcherErrored) {
               return;
@@ -1522,6 +1877,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
         { ignore },
         markSubscribeSettled,
       );
+      // A policy transition that landed while this subscription was opening
+      // wins: release the watcher instead of installing it.
+      if (!this.isAdmissionCurrent(generation) || !this.isAutomaticAllowed(target.cwd)) {
+        await this.unsubscribeWatcherSubscription(subscription, target.watchPath);
+        return false;
+      }
       if (watcherErrored) {
         await this.unsubscribeWatcherSubscription(subscription, target.watchPath);
         return false;
@@ -1600,6 +1961,10 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     const poll = async () => {
       target.fallbackPollTimer = null;
       if (target.closed || this.workingTreeWatchTargets.get(target.cwd) !== target) {
+        return;
+      }
+      if (!this.isAutomaticAllowed(target.cwd)) {
+        target.fallbackPolling = false;
         return;
       }
       const changes = await Promise.all(
@@ -1945,19 +2310,18 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     target: WorkingTreeWatchTarget,
     events: FileChange[],
   ): boolean {
-    const gitDir = join(target.watchPath, ".git");
-    const matchesWatchPath = createRealpathAwarePathMatcher(target.watchPath);
+    const gitRoot = createRebasedRoot(join(target.watchPath, ".git"), target.watchRoot);
     return events.some((event) => {
       // Directory metadata changes at the watch root do not change Git state.
       // FSEvents may emit these when every changed descendant was ignored.
-      if (matchesWatchPath(event.path)) {
+      if (target.watchRoot.matches(event.path)) {
         return false;
       }
-      if (isRealpathInsideRoot(gitDir, event.path)) {
+      if (gitRoot.contains(event.path)) {
         return false;
       }
-      for (const ignoredDirectory of target.ignoredDirectories) {
-        if (isRealpathInsideRoot(ignoredDirectory, event.path)) {
+      for (const ignoredRoot of target.ignoredRoots) {
+        if (ignoredRoot.contains(event.path)) {
           return false;
         }
       }
@@ -2019,6 +2383,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       target.ignoredDirectories = ignoredDirectories;
       this.pruneKnownDirectories(target);
     }
+    target.ignoredRoots = Array.from(ignoredDirectories, (directory) =>
+      createRebasedRoot(directory, target.watchRoot),
+    );
     if (target.fallbackPolling) {
       return;
     }
@@ -2131,6 +2498,11 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     if (!repoGitRoot || !this.isActiveObservedWorkspaceTarget(workspaceTarget)) {
       return;
     }
+    // Repository metadata watchers, the liveness canary and the background fetch
+    // interval are all automatic work.
+    if (!this.isAutomaticAllowed(workspaceTarget.cwd)) {
+      return;
+    }
 
     const existingTarget = this.repoTargets.get(repoGitRoot);
     if (existingTarget) {
@@ -2140,8 +2512,10 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
     const repoTarget: RepoGitTarget = {
       repoGitRoot,
+      repoRoot: createObservationPathRoot(repoGitRoot, workspaceTarget.repoRootAliases ?? []),
       cwd: workspaceTarget.cwd,
       workspaceKeys: new Set([workspaceTarget.cwd]),
+      gitDirRoots: new Map(),
       subscription: null,
       fallbackPolling: false,
       fallbackPollTimer: null,
@@ -2182,19 +2556,39 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       return;
     }
     repoTarget.intervalId = setInterval(() => {
+      if (!this.isRepoTargetAdmitted(repoTarget)) {
+        return;
+      }
       void this.runRepoFetch(repoTarget);
     }, BACKGROUND_GIT_FETCH_INTERVAL_MS);
     void this.runRepoFetch(repoTarget);
+  }
+
+  /**
+   * A shared repository stays admitted while any workspace on it is admitted.
+   * Closing one manual workspace must not take down a local workspace that
+   * shares the same repo, so membership is checked, not the repo's own cwd.
+   */
+  private isRepoTargetAdmitted(target: RepoGitTarget): boolean {
+    if (!this.gitActivity) {
+      return true;
+    }
+    for (const workspaceKey of target.workspaceKeys) {
+      if (this.gitActivity.isAutomatic(workspaceKey)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private async startRepoMetadataObservation(
     target: RepoGitTarget,
     options?: { replaceFallback?: boolean },
   ): Promise<boolean> {
-    const ignore = getPrunedGitMetadataPaths("common").map((path) =>
-      join(target.repoGitRoot, path),
+    const repoRoot = target.repoRoot;
+    const ignore = getPrunedGitMetadataPaths("common").flatMap((path) =>
+      repoRoot.rebase(join(target.repoGitRoot, path)),
     );
-    const matchesRepoGitRoot = createRealpathAwarePathMatcher(target.repoGitRoot);
     const canary = this.deps.createWatcherLivenessCanary(target.repoGitRoot);
     let openedSubscription: FileObserverSubscription | null = null;
     let watcherErrored = false;
@@ -2209,6 +2603,11 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       const subscription = await this.subscribeWithDeadline(
         target.repoGitRoot,
         (error, events) => {
+          // Late deliveries from a watcher that was already closed by a policy
+          // transition must not schedule Git work.
+          if (target.closed || !this.isRepoTargetAdmitted(target)) {
+            return;
+          }
           const liveEvents = canary.filterEvents(events);
           if (error) {
             if (watcherErrored) {
@@ -2234,8 +2633,8 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
           }
           const relevantEvents = liveEvents.filter(
             (event) =>
-              !matchesRepoGitRoot(event.path) &&
-              ignore.every((ignoredPath) => !isRealpathInsideRoot(ignoredPath, event.path)),
+              !repoRoot.matches(event.path) &&
+              ignore.every((path) => !isInsideRoot(path, event.path)),
           );
           if (relevantEvents.length > 0) {
             const immediateEvents = target.fetchInFlight
@@ -2264,6 +2663,10 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       );
       openedSubscription = subscription;
       await canary.verify(this.disposeController.signal);
+      if (!this.isRepoTargetAdmitted(target)) {
+        await this.unsubscribeWatcherSubscription(subscription, target.repoGitRoot);
+        return false;
+      }
       if (watcherErrored) {
         await this.unsubscribeWatcherSubscription(subscription, target.repoGitRoot);
         return false;
@@ -2321,7 +2724,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   private scheduleRepoMetadataWatchRecovery(target: RepoGitTarget): void {
-    if (target.closed || target.subscription || target.recovery.timer) {
+    if (
+      target.closed ||
+      !this.isRepoTargetAdmitted(target) ||
+      target.subscription ||
+      target.recovery.timer
+    ) {
       return;
     }
     const delayMs = this.advanceWatchRecoveryLadder(target.recovery);
@@ -2348,10 +2756,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     events: FileChange[],
   ): Map<string, RepoMetadataWorkspaceRefresh> | null {
     const refreshes = new Map<string, RepoMetadataWorkspaceRefresh>();
-    const matchesRepoGitRoot = createRealpathAwarePathMatcher(target.repoGitRoot);
 
     for (const event of events) {
-      if (!this.routeRepoMetadataEvent(target, event, matchesRepoGitRoot, refreshes)) return null;
+      if (!this.routeRepoMetadataEvent(target, event, target.repoRoot, refreshes)) return null;
     }
 
     return refreshes;
@@ -2363,22 +2770,14 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   ): void {
     const workspaceKeys = new Set<string>();
     for (const event of events) {
-      const commonRelativePath = getRealpathAwareRelativePath(
-        target.repoGitRoot,
-        event.path,
-      )?.replaceAll("\\", "/");
+      const commonRelativePath = target.repoRoot.relativePath(event.path)?.replaceAll("\\", "/");
       if (commonRelativePath === "config" || commonRelativePath === "info/exclude") {
         for (const workspaceKey of target.workspaceKeys) workspaceKeys.add(workspaceKey);
         continue;
       }
       for (const workspaceKey of target.workspaceKeys) {
-        const facts = this.workspaceTargets.get(workspaceKey)?.latestFacts;
-        if (
-          facts?.isGit &&
-          facts.absoluteGitDir &&
-          getRealpathAwareRelativePath(facts.absoluteGitDir, event.path)?.replaceAll("\\", "/") ===
-            "config.worktree"
-        ) {
+        const gitDirRoot = this.getWorkspaceGitDirRoot(target, workspaceKey);
+        if (gitDirRoot?.relativePath(event.path)?.replaceAll("\\", "/") === "config.worktree") {
           workspaceKeys.add(workspaceKey);
         }
       }
@@ -2393,7 +2792,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   private isFetchRemoteMetadataEvent(target: RepoGitTarget, event: FileChange): boolean {
-    const relativePath = getRealpathAwareRelativePath(target.repoGitRoot, event.path);
+    const relativePath = target.repoRoot.relativePath(event.path);
     const effect = classifyGitMetadataPath("common", relativePath ?? "");
     return (
       (effect.kind === "ref" && effect.namespace === "remote") ||
@@ -2405,18 +2804,18 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   private routeRepoMetadataEvent(
     target: RepoGitTarget,
     event: FileChange,
-    matchesRepoGitRoot: ReturnType<typeof createRealpathAwarePathMatcher>,
+    repoRoot: ObservationPathRoot,
     refreshes: Map<string, RepoMetadataWorkspaceRefresh>,
   ): boolean {
-    if (this.routePrivateGitDirEvent(target, event, matchesRepoGitRoot, refreshes)) return true;
+    if (this.routePrivateGitDirEvent(target, event, repoRoot, refreshes)) return true;
 
-    const commonRelativePath = getRealpathAwareRelativePath(target.repoGitRoot, event.path);
+    const commonRelativePath = repoRoot.relativePath(event.path);
     const effect = classifyGitMetadataPath("common", commonRelativePath ?? "");
     switch (effect.kind) {
       case "ignore":
         return true;
       case "owner":
-        this.routeMainCheckoutMetadata(target, matchesRepoGitRoot, effect.refreshBase, refreshes);
+        this.routeMainCheckoutMetadata(target, repoRoot, effect.refreshBase, refreshes);
         return true;
       case "ref":
         if (effect.namespace === "local") {
@@ -2462,16 +2861,16 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   private routePrivateGitDirEvent(
     target: RepoGitTarget,
     event: FileChange,
-    matchesRepoGitRoot: ReturnType<typeof createRealpathAwarePathMatcher>,
+    repoRoot: ObservationPathRoot,
     refreshes: Map<string, RepoMetadataWorkspaceRefresh>,
   ): boolean {
     let matched = false;
     for (const workspaceKey of target.workspaceKeys) {
-      const facts = this.workspaceTargets.get(workspaceKey)?.latestFacts;
-      if (!facts?.isGit || !facts.absoluteGitDir || matchesRepoGitRoot(facts.absoluteGitDir)) {
+      const gitDirRoot = this.getWorkspaceGitDirRoot(target, workspaceKey);
+      if (!gitDirRoot || repoRoot.matches(gitDirRoot.root)) {
         continue;
       }
-      const relativePath = getRealpathAwareRelativePath(facts.absoluteGitDir, event.path);
+      const relativePath = gitDirRoot.relativePath(event.path);
       if (relativePath === null) continue;
       matched = true;
       const effect = classifyGitMetadataPath("worktree", relativePath);
@@ -2486,16 +2885,34 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
 
   private routeMainCheckoutMetadata(
     target: RepoGitTarget,
-    matchesRepoGitRoot: ReturnType<typeof createRealpathAwarePathMatcher>,
+    repoRoot: ObservationPathRoot,
     refreshBase: boolean,
     refreshes: Map<string, RepoMetadataWorkspaceRefresh>,
   ): void {
     for (const workspaceKey of target.workspaceKeys) {
-      const facts = this.workspaceTargets.get(workspaceKey)?.latestFacts;
-      if (facts?.isGit && facts.absoluteGitDir && matchesRepoGitRoot(facts.absoluteGitDir)) {
+      const gitDirRoot = this.getWorkspaceGitDirRoot(target, workspaceKey);
+      if (gitDirRoot && repoRoot.matches(gitDirRoot.root)) {
         this.addWorkspaceMetadataRefresh(refreshes, workspaceKey, refreshBase);
       }
     }
+  }
+
+  /**
+   * The private git dir of one workspace sharing this repository, expressed
+   * through the repository root's aliases. Returns null for workspaces whose
+   * facts are unknown or whose git dir is unavailable.
+   */
+  private getWorkspaceGitDirRoot(
+    target: RepoGitTarget,
+    workspaceKey: string,
+  ): ObservationPathRoot | null {
+    const facts = this.workspaceTargets.get(workspaceKey)?.latestFacts;
+    if (!facts?.isGit || !facts.absoluteGitDir) return null;
+    const cached = target.gitDirRoots.get(workspaceKey);
+    if (cached?.root === facts.absoluteGitDir) return cached;
+    const root = createRebasedRoot(facts.absoluteGitDir, target.repoRoot);
+    target.gitDirRoots.set(workspaceKey, root);
+    return root;
   }
 
   private routeLocalBranchRef(
@@ -2652,6 +3069,10 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       if (target.closed || this.repoTargets.get(target.repoGitRoot) !== target) {
         return;
       }
+      if (!this.isRepoTargetAdmitted(target)) {
+        target.fallbackPolling = false;
+        return;
+      }
       const workingTreeTargets = new Set<WorkingTreeWatchTarget>();
       const changes = await Promise.all(
         Array.from(target.workspaceKeys, async (workspaceKey) => {
@@ -2709,6 +3130,12 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     if (!target || target.closed || this.workspaceTargets.get(target.cwd) !== target) {
       return;
     }
+    // Every debounced automatic refresh funnels through here, so this one gate
+    // covers watcher events, metadata refreshes and fallback polls alike.
+    if (!this.isAutomaticAllowed(target.cwd)) {
+      target.pendingDebounceRequest = null;
+      return;
+    }
 
     const request = this.buildScheduledRefreshRequest(options);
     target.pendingDebounceRequest = this.mergeRefreshRequests(
@@ -2734,6 +3161,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   private startWorkspaceSubscriptionTimers(target: WorkspaceGitTarget): void {
+    if (!this.isAutomaticAllowed(target.cwd)) {
+      return;
+    }
     if (!target.observationReensureTimer) {
       const reensureObservation = () => {
         if (!this.isActiveObservedWorkspaceTarget(target)) {
@@ -2776,6 +3206,15 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     const pollTarget = this.resolveForgePrStatusPollTarget(target);
     const remoteUrl = git.remoteUrl;
     if (!pollTarget) {
+      this.stopForgePrStatusPollForTarget(target);
+      return;
+    }
+    // A recurring poll is automatic Git activity, so it is refused (and an
+    // already-armed one is torn down) under a manual policy. This sits after
+    // every stop-path guard so teardown still runs when listeners drop or the
+    // remote disappears, and before the unchanged-key return so a policy flip
+    // still reaches the teardown.
+    if (!this.isAutomaticAllowed(target.cwd)) {
       this.stopForgePrStatusPollForTarget(target);
       return;
     }
@@ -2949,6 +3388,19 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     target.forgePrStatusPollSubscription?.unsubscribe();
     target.forgePrStatusPollSubscription = null;
     target.forgePrStatusPollKey = null;
+  }
+
+  /**
+   * Resolves a watch root's realpath aliases once, before the root is used to
+   * filter events. Never called from a watcher callback: the promise may take up
+   * to the alias timeout to settle, and event delivery must stay synchronous.
+   */
+  private async ensureObservationRoot(root: string): Promise<ObservationPathRoot> {
+    const aliases = await this.deps.resolveObservationRootAliases(root);
+    return createObservationPathRoot(
+      root,
+      aliases.filter((alias) => alias !== root),
+    );
   }
 
   /**
@@ -3516,6 +3968,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   private async runRepoFetch(target: RepoGitTarget): Promise<void> {
+    if (target.closed || !this.isRepoTargetAdmitted(target)) {
+      return;
+    }
     if (target.fetchInFlight) {
       return;
     }

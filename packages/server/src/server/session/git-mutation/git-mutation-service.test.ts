@@ -10,6 +10,8 @@ import type {
   WorkspaceGitService,
 } from "../../workspace-git-service.js";
 import { createGitMutationService } from "./git-mutation-service.js";
+import { createManualGitActivityPolicy } from "../../test-utils/workspace-git-service-stub.js";
+import type { GitActivityPolicyService } from "../../git-activity/policy.js";
 
 // The production module reads only WorkspaceGitService.{validateBranchRef,getSnapshot,
 // hasLocalBranch,invalidateForge}. The fake below implements exactly that slice as an
@@ -57,9 +59,9 @@ function createFakeGit(opts: FakeGitOptions = {}) {
   return { git, snapshotCalls, invalidateCalls };
 }
 
-function buildService(gitOptions: FakeGitOptions = {}) {
+function buildService(gitOptions: FakeGitOptions = {}, gitActivity?: GitActivityPolicyService) {
   const { git, snapshotCalls, invalidateCalls } = createFakeGit(gitOptions);
-  const service = createGitMutationService({ workspaceGitService: git, logger });
+  const service = createGitMutationService({ workspaceGitService: git, logger, gitActivity });
   return { service, snapshotCalls, invalidateCalls };
 }
 
@@ -280,5 +282,38 @@ describe("notifyGitMutation", () => {
   test("swallows a snapshot-refresh failure", async () => {
     const { service } = buildService({ getSnapshotThrows: true });
     await expect(service.notifyGitMutation("/tmp/repo", "pull")).resolves.toBeUndefined();
+  });
+
+  test("a mutation followup does not refresh a workspace that is not admitted", async () => {
+    const { service, snapshotCalls } = buildService({}, createManualGitActivityPolicy());
+    await service.notifyGitMutation("/tmp/repo", "commit-changes");
+    // The user's mutation already ran. What must not happen is the follow-up
+    // leaving background observation behind, which is what this refresh arms.
+    expect(snapshotCalls).toEqual([]);
+  });
+
+  test("a mutation followup still refreshes an admitted workspace", async () => {
+    const allowing: GitActivityPolicyService = {
+      isAutomatic: () => true,
+      peek: () => ({
+        configuredPolicy: "auto",
+        effectiveMode: "automatic",
+        reason: "storage_local",
+        lastCheckedAt: null,
+      }),
+      resolve: async () => ({
+        configuredPolicy: "auto",
+        effectiveMode: "automatic",
+        reason: "storage_local",
+        lastCheckedAt: null,
+      }),
+      refreshPolicy: () => {},
+      invalidate: () => {},
+      invalidateMountTable: () => {},
+      dispose: () => {},
+    };
+    const { service, snapshotCalls } = buildService({}, allowing);
+    await service.notifyGitMutation("/tmp/repo", "commit-changes");
+    expect(snapshotCalls).toEqual([{ cwd: "/tmp/repo", force: true, reason: "commit-changes" }]);
   });
 });

@@ -3,8 +3,16 @@ import type { SubscribeCheckoutDiffRequest, SessionOutboundMessage } from "./mes
 import type { WorkspaceGitRuntimeSnapshot, WorkspaceGitService } from "./workspace-git-service.js";
 import { expandTilde } from "../utils/path.js";
 import { toCheckoutError } from "./checkout-git-utils.js";
+import type { GitActivityPolicyService } from "./git-activity/policy.js";
 
 const CHECKOUT_DIFF_WATCH_DEBOUNCE_MS = 150;
+
+/**
+ * Why an automatic Git read was refused. Reuses the existing NOT_ALLOWED code —
+ * the closed CheckoutErrorCode union is not extended for this feature.
+ */
+const GIT_ACTIVITY_PAUSED_MESSAGE =
+  "Automatic Git updates are paused for this workspace. Refresh to read Git state.";
 
 type CheckoutDiffWorkspace = Pick<
   WorkspaceGitService,
@@ -65,18 +73,62 @@ export class CheckoutDiffManager {
   private readonly workspaceGitService: CheckoutDiffWorkspace;
   private readonly targets = new Map<string, CheckoutDiffWatchTarget>();
 
+  private readonly gitActivity: GitActivityPolicyService | undefined;
+
   constructor(options: {
     logger: pino.Logger;
     paseoHome: string;
     workspaceGitService: CheckoutDiffWorkspace;
+    /** Host-global Git activity admission. See `git-activity/policy.ts`. */
+    gitActivity?: GitActivityPolicyService;
   }) {
     this.workspaceGitService = options.workspaceGitService;
+    this.gitActivity = options.gitActivity;
+  }
+
+  /**
+   * The payload a legacy automatic diff request gets on a manual workspace.
+   *
+   * Already-cached state is returned as-is, so a client that legitimately has a
+   * previous diff keeps seeing it. With nothing cached the client gets the
+   * existing parseable error shape with a paused refresh marker rather than a
+   * computed result: the empty file list is an absence of data, never a
+   * "no changes" fact.
+   *
+   * The lookup is keyed by cwd **and compare**. Matching on cwd alone would
+   * serve whatever diff happens to be cached for that directory -- uncommitted
+   * files to a caller that asked to compare against `main`, for instance --
+   * presenting one comparison's result as another's. A request with no exactly
+   * matching cache gets the paused payload instead.
+   */
+  private buildManualDiffPayload(
+    cwd: string,
+    compare: CheckoutDiffCompareInput,
+  ): CheckoutDiffSnapshotPayload {
+    const targetKey = this.buildTargetKey(cwd, compare);
+    const exact = this.targets.get(targetKey);
+    if (exact?.latestPayload) {
+      return exact.latestPayload;
+    }
+    return {
+      cwd,
+      files: [],
+      error: {
+        code: "NOT_ALLOWED",
+        message: GIT_ACTIVITY_PAUSED_MESSAGE,
+      },
+    };
   }
 
   async read(
     params: Omit<CheckoutDiffSubscriptionRequest, "signal">,
   ): Promise<CheckoutDiffSnapshotPayload> {
-    return this.computeCheckoutDiffSnapshot(params.cwd, this.normalizeCompare(params.compare));
+    // An explicit read must bypass the cache: manual workspaces have no watcher
+    // to invalidate it after edits made outside Paseo.
+    return this.computeCheckoutDiffSnapshot(params.cwd, this.normalizeCompare(params.compare), {
+      force: true,
+      reason: "manual-diff-read",
+    });
   }
 
   async subscribe(
@@ -85,6 +137,16 @@ export class CheckoutDiffManager {
   ): Promise<CheckoutDiffSubscription> {
     const cwd = params.cwd;
     const compare = this.normalizeCompare(params.compare);
+    // Old clients still send subscribe_checkout_diff_request, including on every
+    // reconnect. That request carries no explicit user intent, so a manual
+    // workspace must give it ZERO Git reads — not merely "no observer". Serving a
+    // bounded read here would let a reconnect storm run one full diff per event.
+    if (this.gitActivity && !this.gitActivity.isAutomatic(cwd)) {
+      return {
+        initial: this.buildManualDiffPayload(cwd, compare),
+        unsubscribe: () => {},
+      };
+    }
     const target = this.ensureTarget(cwd, compare);
     target.listeners.add(listener);
     target.openPromise ??= this.openTarget(target);
@@ -121,6 +183,11 @@ export class CheckoutDiffManager {
 
   scheduleRefreshForCwd(cwd: string): void {
     const resolvedCwd = expandTilde(cwd);
+    // Automatic refresh only. An explicit mutation follow-up must not re-arm a
+    // live subscription on a manual workspace.
+    if (this.gitActivity && !this.gitActivity.isAutomatic(resolvedCwd)) {
+      return;
+    }
     for (const target of this.targets.values()) {
       if (target.cwd !== resolvedCwd && target.diffCwd !== resolvedCwd) {
         continue;

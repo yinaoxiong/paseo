@@ -931,6 +931,8 @@ export const zhCN: TranslationResources = {
         refresh: "刷新",
         refreshState: "刷新 git 和 {{brand}} 状态",
         failedRefresh: "刷新 git 状态失败。",
+        manualRefreshHostUpdate: "请更新主机端，以在手动模式下刷新 Git 更改。",
+        manualRefreshRequired: "自动 Git 更新已暂停。请手动刷新以读取此差异。",
         seeUncommittedChanges: "查看未 commit 的变更",
         seeCommittedChanges: "查看已 commit 的变更",
         checkingRepository: "正在检查 repository...",

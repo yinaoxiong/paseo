@@ -1,5 +1,8 @@
-import { statSync, watch as watchPath } from "node:fs";
+import { watch as watchPath } from "node:fs";
+import { resolve } from "node:path";
+import { stat } from "node:fs/promises";
 import type { ProjectCheckoutLitePayload } from "@getpaseo/protocol/messages";
+import pLimit from "p-limit";
 import type pino from "pino";
 import type {
   ProjectRegistry,
@@ -9,6 +12,7 @@ import type {
 } from "./workspace-registry.js";
 import type { WorkspaceGitService } from "./workspace-git-service.js";
 import { areEquivalentPaths } from "../utils/path.js";
+import { withTimeout } from "../utils/promise-timeout.js";
 import {
   deriveProjectKind,
   reconcileWorkspacePlacement,
@@ -16,9 +20,12 @@ import {
 } from "./workspace-registry-model.js";
 import { workspaceIdsForProjects } from "./workspace-directory.js";
 import { deriveProjectKey } from "./project-key.js";
+import type { GitActivityPolicyService } from "./git-activity/policy.js";
 
 const DEFAULT_RESCAN_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_DEBOUNCE_MS = 100;
+const DIRECTORY_STAT_CONCURRENCY = 2;
+const DIRECTORY_STAT_TIMEOUT_MS = 5_000;
 
 export type ProjectUpdate =
   | { kind: "upsert"; project: PersistedProjectRecord }
@@ -81,6 +88,10 @@ export interface ReconciliationResult {
   durationMs: number;
 }
 
+export interface DirectoryStat {
+  isDirectory(): boolean;
+}
+
 export interface WorkspaceReconciliationServiceOptions {
   serverId?: string;
   projectRegistry: ProjectRegistry;
@@ -88,6 +99,8 @@ export interface WorkspaceReconciliationServiceOptions {
   logger: pino.Logger;
   onChanges?: (changes: ReconciliationChange[]) => void;
   workspaceGitService?: Pick<WorkspaceGitService, "getCheckout">;
+  /** Host-global Git activity policy. Omitted means allow-all. */
+  gitActivity?: ReconciliationGitActivity;
   onProjectUpdate?: (update: ProjectUpdate) => void;
   onWorkspaceArchived?: (workspaceId: string) => void | Promise<void>;
   onWorkspacesChanged?: (workspaceIds: string[]) => Promise<void>;
@@ -95,20 +108,47 @@ export interface WorkspaceReconciliationServiceOptions {
   clock?: ReconciliationClock;
   rescanIntervalMs?: number;
   debounceMs?: number;
+  statDirectory?: (targetPath: string) => Promise<DirectoryStat>;
+  directoryStatTimeoutMs?: number;
+  directoryStatConcurrency?: number;
 }
+
+/**
+ * A Git read is either a real checkout or a policy refusal. The refusal is its
+ * own variant rather than an `isGit: false` payload: `readCheckout` already
+ * returns that payload when no Git service is injected, so a synthetic one
+ * would be indistinguishable from it and would still rewrite `kind` to
+ * `non_git` and collapse a worktree's placement.
+ */
+export type CheckoutRead =
+  | { kind: "checkout"; checkout: ProjectCheckoutLitePayload }
+  | { kind: "skipped"; cwd: string };
 
 interface ProjectReconciliationInput {
   project: PersistedProjectRecord;
   siblings: PersistedWorkspaceRecord[];
   currentGit: ProjectCheckoutLitePayload;
-  readCheckout: (cwd: string) => Promise<ProjectCheckoutLitePayload>;
+  readCheckout: (cwd: string) => Promise<CheckoutRead>;
   changes: ReconciliationChange[];
 }
 
 interface CachedCheckoutRead {
   cwd: string;
-  checkout: Promise<ProjectCheckoutLitePayload>;
+  checkout: Promise<CheckoutRead>;
 }
+
+/**
+ * The reconciliation slice of the host-global policy owner.
+ *
+ * Reconciliation takes the service itself rather than a boolean predicate: it
+ * also has to call `ensureClassification`, which is what lets an unclassified
+ * root converge instead of staying skipped forever. `peek` is what separates
+ * that case from a host decision -- `isAutomatic` is false for both.
+ */
+export type ReconciliationGitActivity = Pick<
+  GitActivityPolicyService,
+  "isAutomatic" | "ensureClassification" | "peek"
+>;
 
 type DirectoryState = "directory" | "missing" | "unreadable";
 
@@ -119,6 +159,7 @@ export class WorkspaceReconciliationService {
   private readonly logger: pino.Logger;
   private readonly onChanges: ((changes: ReconciliationChange[]) => void) | null;
   private readonly workspaceGitService: Pick<WorkspaceGitService, "getCheckout"> | null;
+  private readonly gitActivity: ReconciliationGitActivity | null;
   private readonly onProjectUpdate: ((update: ProjectUpdate) => void) | null;
   private readonly onWorkspaceArchived: ((workspaceId: string) => void | Promise<void>) | null;
   private readonly onWorkspacesChanged: ((workspaceIds: string[]) => Promise<void>) | null;
@@ -126,6 +167,9 @@ export class WorkspaceReconciliationService {
   private readonly clock: ReconciliationClock;
   private readonly rescanIntervalMs: number;
   private readonly debounceMs: number;
+  private readonly statDirectory: (targetPath: string) => Promise<DirectoryStat>;
+  private readonly directoryStatTimeoutMs: number;
+  private readonly directoryInspectLimit: ReturnType<typeof pLimit>;
   private readonly watchers: Array<{ rootPath: string; watcher: ProjectRootWatcher }> = [];
   private unsubscribeRegistry: (() => void) | null = null;
   private rescanTimer: ReconciliationTimer | null = null;
@@ -134,6 +178,8 @@ export class WorkspaceReconciliationService {
   private started = false;
   private reconciling = false;
   private reconcileQueuedMode: "metadata" | "full" | null = null;
+  /** At most one classification attempt per root, keyed by resolved root path. */
+  private readonly classificationRequests = new Map<string, Promise<void>>();
 
   constructor(options: WorkspaceReconciliationServiceOptions) {
     this.serverId = options.serverId;
@@ -142,6 +188,7 @@ export class WorkspaceReconciliationService {
     this.logger = options.logger.child({ module: "workspace-reconciliation" });
     this.onChanges = options.onChanges ?? null;
     this.workspaceGitService = options.workspaceGitService ?? null;
+    this.gitActivity = options.gitActivity ?? null;
     this.onProjectUpdate = options.onProjectUpdate ?? null;
     this.onWorkspaceArchived = options.onWorkspaceArchived ?? null;
     this.onWorkspacesChanged = options.onWorkspacesChanged ?? null;
@@ -149,6 +196,11 @@ export class WorkspaceReconciliationService {
     this.clock = options.clock ?? systemClock;
     this.rescanIntervalMs = options.rescanIntervalMs ?? DEFAULT_RESCAN_INTERVAL_MS;
     this.debounceMs = options.debounceMs ?? DEFAULT_DEBOUNCE_MS;
+    this.statDirectory = options.statDirectory ?? ((targetPath) => stat(targetPath));
+    this.directoryStatTimeoutMs = options.directoryStatTimeoutMs ?? DIRECTORY_STAT_TIMEOUT_MS;
+    this.directoryInspectLimit = pLimit(
+      options.directoryStatConcurrency ?? DIRECTORY_STAT_CONCURRENCY,
+    );
   }
 
   async start(): Promise<void> {
@@ -180,6 +232,7 @@ export class WorkspaceReconciliationService {
 
   dispose(): void {
     this.disposed = true;
+    this.classificationRequests.clear();
     this.unsubscribeRegistry?.();
     this.unsubscribeRegistry = null;
     if (this.rescanTimer) this.clock.clearInterval(this.rescanTimer);
@@ -196,16 +249,22 @@ export class WorkspaceReconciliationService {
       this.projectRegistry.list(),
       this.workspaceRegistry.list(),
     ]);
+    const activeWorkspaces = workspaces.filter((workspace) => !workspace.archivedAt);
+    const activeProjects = projects.filter((project) => !project.archivedAt);
+    const directoryStates = await this.inspectDirectories([
+      ...activeWorkspaces.map((workspace) => workspace.cwd),
+      ...activeProjects.map((project) => project.rootPath),
+    ]);
     const workspacesByProject = new Map<string, PersistedWorkspaceRecord[]>();
-    for (const workspace of workspaces) {
-      if (workspace.archivedAt || this.inspectDirectory(workspace.cwd) !== "directory") continue;
+    for (const workspace of activeWorkspaces) {
+      if (directoryStateFor(directoryStates, workspace.cwd) !== "directory") continue;
       const siblings = workspacesByProject.get(workspace.projectId) ?? [];
       siblings.push(workspace);
       workspacesByProject.set(workspace.projectId, siblings);
     }
     await this.reconcileGitMetadataForProjects(
-      projects.filter(
-        (project) => !project.archivedAt && this.inspectDirectory(project.rootPath) === "directory",
+      activeProjects.filter(
+        (project) => directoryStateFor(directoryStates, project.rootPath) === "directory",
       ),
       workspacesByProject,
       changes,
@@ -223,16 +282,25 @@ export class WorkspaceReconciliationService {
 
     const activeProjects = allProjects.filter((p) => !p.archivedAt);
     const activeWorkspaces = allWorkspaces.filter((w) => !w.archivedAt);
+    const workspaceDirectoryStatesByPath = await this.inspectDirectories(
+      activeWorkspaces.map((workspace) => workspace.cwd),
+    );
     const workspaceDirectoryStates = activeWorkspaces.map((workspace) => ({
       workspace,
-      state: this.inspectDirectory(workspace.cwd),
+      state: directoryStateFor(workspaceDirectoryStatesByPath, workspace.cwd),
     }));
     // Project roots are read after the workspace directories, so a volume that
     // goes away mid-pass leaves its project unreachable rather than its workspaces
     // alone. The skew can only withhold an archive, never produce one.
+    const projectDirectoryStates = await this.inspectDirectories(
+      activeProjects.map((project) => project.rootPath),
+      workspaceDirectoryStatesByPath,
+    );
     const reachableProjectIds = new Set(
       activeProjects
-        .filter((project) => this.inspectDirectory(project.rootPath) === "directory")
+        .filter(
+          (project) => directoryStateFor(projectDirectoryStates, project.rootPath) === "directory",
+        )
         .map((project) => project.projectId),
     );
 
@@ -310,7 +378,7 @@ export class WorkspaceReconciliationService {
     changes: ReconciliationChange[],
   ): Promise<void> {
     const checkoutReads: CachedCheckoutRead[] = [];
-    const readCheckout = (cwd: string): Promise<ProjectCheckoutLitePayload> => {
+    const readCheckout = (cwd: string): Promise<CheckoutRead> => {
       const existing = checkoutReads.find((read) => areEquivalentPaths(read.cwd, cwd));
       if (existing) return existing.checkout;
       const checkout = this.readCheckout(cwd);
@@ -329,12 +397,13 @@ export class WorkspaceReconciliationService {
       roots.map(async ({ rootPath, projects }) => {
         try {
           const rootGit = await readCheckout(rootPath);
+          if (rootGit.kind === "skipped") return;
           await Promise.all(
             projects.map((project) =>
               this.reconcileProject({
                 project,
                 siblings: workspacesByProject.get(project.projectId) ?? [],
-                currentGit: rootGit,
+                currentGit: rootGit.checkout,
                 readCheckout,
                 changes,
               }),
@@ -355,7 +424,7 @@ export class WorkspaceReconciliationService {
     const workspaceCheckouts = await Promise.all(
       siblings.map(async (workspace) => ({
         workspace,
-        checkout: await readCheckout(workspace.cwd),
+        read: await readCheckout(workspace.cwd),
       })),
     );
     const projectUpdates: Partial<Pick<PersistedProjectRecord, "kind" | "projectKey">> = {};
@@ -391,11 +460,14 @@ export class WorkspaceReconciliationService {
     }
 
     await Promise.all(
-      workspaceCheckouts.map(async ({ workspace, checkout: wsGit }) => {
+      workspaceCheckouts.map(async ({ workspace, read }) => {
+        // A sibling refused by policy keeps its persisted placement: guessing
+        // from a skipped read is what collapses a worktree into a directory.
+        if (read.kind === "skipped") return;
         const timestamp = new Date().toISOString();
         const update = reconcileWorkspacePlacement({
           workspace,
-          checkout: wsGit,
+          checkout: read.checkout,
           updatedAt: timestamp,
         });
         if (!update) return;
@@ -522,24 +594,99 @@ export class WorkspaceReconciliationService {
     }
   }
 
-  private async readCheckout(cwd: string): Promise<ProjectCheckoutLitePayload> {
+  /**
+   * Reads Git metadata for one path unless the host policy withholds it.
+   *
+   * A withheld read is a `skipped` sentinel, never a synthetic `isGit: false`
+   * payload: that payload is already what the no-Git-service path returns, and
+   * feeding it onward would rewrite `kind` to `non_git` and collapse a
+   * worktree's placement.
+   */
+  private async readCheckout(cwd: string): Promise<CheckoutRead> {
+    if (this.gitActivity && !this.gitActivity.isAutomatic(cwd)) {
+      // "Not automatic" covers two very different states: a host decision, and a
+      // root that simply is not classified yet. Under `auto` the second is the
+      // normal case on first sight, and no other caller would ask for the real
+      // answer, so a bare skip would be permanent.
+      this.requestClassificationWhenUndecided(cwd);
+      return { kind: "skipped", cwd };
+    }
     if (!this.workspaceGitService) {
       return {
-        cwd,
-        isGit: false as const,
-        currentBranch: null,
-        remoteUrl: null,
-        worktreeRoot: null,
-        isPaseoOwnedWorktree: false as const,
-        mainRepoRoot: null,
+        kind: "checkout",
+        checkout: {
+          cwd,
+          isGit: false as const,
+          currentBranch: null,
+          remoteUrl: null,
+          worktreeRoot: null,
+          isPaseoOwnedWorktree: false as const,
+          mainRepoRoot: null,
+        },
       };
     }
-    return this.workspaceGitService.getCheckout(cwd);
+    const checkout = await this.workspaceGitService.getCheckout(cwd);
+    return { kind: "checkout", checkout };
   }
 
-  private inspectDirectory(targetPath: string): DirectoryState {
+  /**
+   * Asks the policy service to settle a root whose effective mode is not yet
+   * decided. Bounded to one in-flight request per path, and never awaited here:
+   * classification reads the mount table rather than the workspace tree, but it
+   * is still asynchronous work, so awaiting it would put another caller's timing
+   * on the reconciliation path.
+   */
+  private requestClassificationWhenUndecided(cwd: string): void {
+    const gitActivity = this.gitActivity;
+    if (!gitActivity) return;
+    const key = resolve(cwd);
+    if (this.classificationRequests.has(key)) return;
+    // `manual` is a decision; only an undetermined verdict can still change.
+    const state = gitActivity.peek(key);
+    if (state.effectiveMode !== "unknown") return;
+    const pending = gitActivity
+      .ensureClassification(key)
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        this.logger.warn(
+          { err: error, cwd: key },
+          "Filesystem classification failed; workspace stays manual",
+        );
+      })
+      .finally(() => {
+        if (this.classificationRequests.get(key) === pending) {
+          this.classificationRequests.delete(key);
+        }
+      });
+    this.classificationRequests.set(key, pending);
+  }
+
+  private async inspectDirectories(
+    paths: string[],
+    states: Map<string, DirectoryState> = new Map(),
+  ): Promise<Map<string, DirectoryState>> {
+    const uniquePaths = uniqueDirectoryPaths(paths).filter(
+      (targetPath) =>
+        !Array.from(states.keys()).some((existing) => areEquivalentPaths(existing, targetPath)),
+    );
+    await Promise.all(
+      uniquePaths.map((targetPath) =>
+        this.directoryInspectLimit(async () => {
+          states.set(targetPath, await this.inspectDirectory(targetPath));
+        }),
+      ),
+    );
+    return states;
+  }
+
+  private async inspectDirectory(targetPath: string): Promise<DirectoryState> {
     try {
-      return statSync(targetPath).isDirectory() ? "directory" : "missing";
+      const stats = await withTimeout(
+        this.statDirectory(targetPath),
+        this.directoryStatTimeoutMs,
+        `Directory inspection timed out: ${targetPath}`,
+      );
+      return stats.isDirectory() ? "directory" : "missing";
     } catch (error) {
       if (isMissingPathError(error)) return "missing";
       this.logger.warn(
@@ -549,6 +696,25 @@ export class WorkspaceReconciliationService {
       return "unreadable";
     }
   }
+}
+
+function uniqueDirectoryPaths(paths: string[]): string[] {
+  const unique: string[] = [];
+  for (const targetPath of paths) {
+    if (unique.some((existing) => areEquivalentPaths(existing, targetPath))) continue;
+    unique.push(targetPath);
+  }
+  return unique;
+}
+
+function directoryStateFor(
+  states: Map<string, DirectoryState>,
+  targetPath: string,
+): DirectoryState {
+  for (const [path, state] of states) {
+    if (areEquivalentPaths(path, targetPath)) return state;
+  }
+  return "unreadable";
 }
 
 function isMissingPathError(error: unknown): boolean {

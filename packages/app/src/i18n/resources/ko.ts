@@ -946,6 +946,10 @@ export const ko: TranslationResources = {
         refresh: "새로고침",
         refreshState: "Git 및 {{brand}} 상태 새로고침",
         failedRefresh: "Git 상태를 새로고침하지 못했습니다.",
+        manualRefreshHostUpdate:
+          "수동 모드에서 Git 변경 내용을 새로 고치려면 호스트를 업데이트하세요.",
+        manualRefreshRequired:
+          "자동 Git 업데이트가 일시 중지되었습니다. 새로 고침하여 변경 내용을 확인하세요.",
         seeUncommittedChanges: "커밋되지 않은 변경 사항 보기",
         seeCommittedChanges: "커밋된 변경 사항 보기",
         checkingRepository: "저장소 확인 중...",

@@ -2,7 +2,8 @@ import type { CheckoutPrMergeMethod } from "@getpaseo/protocol/messages";
 import { create } from "zustand";
 import { queryClient as appQueryClient } from "@/data/query-client";
 import { useSessionStore } from "@/stores/session-store";
-import { invalidateCheckoutGitQueriesForClient } from "@/git/query-keys";
+import { checkoutDiffQueryKey, invalidateCheckoutGitQueriesForClient } from "@/git/query-keys";
+import { resolveWorkingDiffComparison } from "@/git/working-diff-comparison";
 import { i18n } from "@/i18n/i18next";
 
 const SUCCESS_DISPLAY_MS = 1000;
@@ -29,6 +30,12 @@ export type CheckoutGitAsyncActionId =
 
 type CheckoutKey = string;
 type StatusMap = Partial<Record<CheckoutGitAsyncActionId, CheckoutGitActionStatus>>;
+
+interface CheckoutRefreshInput {
+  serverId: string;
+  cwd: string;
+  diff?: { workspaceId?: string; ignoreWhitespace: boolean };
+}
 
 function checkoutKey(serverId: string, cwd: string): CheckoutKey {
   return `${serverId}::${cwd}`;
@@ -106,7 +113,7 @@ interface CheckoutGitActionsStoreState {
   pull: (params: { serverId: string; cwd: string }) => Promise<void>;
   push: (params: { serverId: string; cwd: string }) => Promise<void>;
   pullAndPush: (params: { serverId: string; cwd: string }) => Promise<void>;
-  refresh: (params: { serverId: string; cwd: string }) => Promise<void>;
+  refresh: (params: CheckoutRefreshInput) => Promise<void>;
   createPr: (params: { serverId: string; cwd: string }) => Promise<void>;
   mergePr: (params: {
     serverId: string;
@@ -227,7 +234,7 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
     });
   },
 
-  refresh: async ({ serverId, cwd }) => {
+  refresh: async ({ serverId, cwd, diff }) => {
     await runCheckoutAction({
       serverId,
       cwd,
@@ -237,6 +244,35 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
         const payload = await client.checkoutRefresh(cwd);
         if (payload.error) {
           throw new Error(payload.error.message);
+        }
+        if (diff) {
+          // Manual workspaces have no diff subscription. Only this user action
+          // reads a diff; mounting, focusing and reconnecting stay read-free.
+          const status = payload.status;
+          if (!status) throw new Error(i18n.t("workspace.git.diff.failedRefresh"));
+          if (!status.isGit) return;
+          const mode = resolveWorkingDiffComparison({
+            serverId,
+            cwd,
+            workspaceId: diff.workspaceId,
+            isDirty: status.isDirty,
+          });
+          const baseRef = mode === "base" ? (status.baseRef ?? undefined) : undefined;
+          const snapshot = await client.getCheckoutDiff(cwd, {
+            mode,
+            baseRef,
+            ignoreWhitespace: diff.ignoreWhitespace,
+          });
+          const queryKey = checkoutDiffQueryKey(
+            serverId,
+            cwd,
+            mode,
+            baseRef,
+            diff.ignoreWhitespace,
+          );
+          appQueryClient.setQueryData(queryKey, snapshot);
+          appQueryClient.setQueriesData({ queryKey }, snapshot);
+          if (snapshot.error) throw new Error(snapshot.error.message);
         }
       },
     });

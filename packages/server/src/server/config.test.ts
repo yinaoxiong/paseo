@@ -4,7 +4,12 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "vitest";
 
-import { loadConfig, resolveBundledWebUiDistDir, resolveConfigFromPersisted } from "./config.js";
+import {
+  getGitActivityPolicy,
+  loadConfig,
+  resolveBundledWebUiDistDir,
+  resolveConfigFromPersisted,
+} from "./config.js";
 import { loadPersistedConfig } from "./persisted-config.js";
 
 const roots: string[] = [];
@@ -214,4 +219,88 @@ test("loads private plugin registry settings through the configuration boundary"
   } finally {
     await rm(home, { recursive: true, force: true });
   }
+});
+
+describe("daemon Git activity policy", () => {
+  afterEach(async () => {
+    await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  });
+
+  async function createHome(config: object = {}): Promise<string> {
+    const home = await mkdtemp(path.join(os.tmpdir(), "paseo-config-git-policy-"));
+    roots.push(home);
+    await writeFile(path.join(home, "config.json"), JSON.stringify(config));
+    return home;
+  }
+
+  test("defaults to auto when the config says nothing", async () => {
+    const home = await createHome();
+
+    expect(loadConfig(home, { env: {} }).git).toEqual({
+      maxProcessesPerSecond: 64,
+      maxProcessConcurrency: 8,
+      policy: "auto",
+    });
+  });
+
+  test("carries the persisted policy alongside the process limits", async () => {
+    const home = await createHome({
+      daemon: {
+        git: { maxProcessesPerSecond: 5, maxProcessConcurrency: 4, policy: "manual" },
+      },
+    });
+
+    const config = loadConfig(home, { env: {} });
+    expect(config.git).toEqual({
+      maxProcessesPerSecond: 5,
+      maxProcessConcurrency: 4,
+      policy: "manual",
+    });
+    expect(getGitActivityPolicy(config)).toBe("manual");
+  });
+
+  test("has no environment override", async () => {
+    const home = await createHome({ daemon: { git: { policy: "manual" } } });
+
+    expect(
+      loadConfig(home, {
+        env: {
+          PASEO_GIT_ACTIVITY_POLICY: "enabled",
+          PASEO_GIT_POLICY: "enabled",
+        },
+      }).git?.policy,
+    ).toBe("manual");
+
+    const bare = await createHome();
+    expect(loadConfig(bare, { env: { PASEO_GIT_ACTIVITY_POLICY: "enabled" } }).git?.policy).toBe(
+      "auto",
+    );
+  });
+
+  test("rejects an unknown persisted policy instead of silently defaulting", async () => {
+    const home = await createHome({ daemon: { git: { policy: "sometimes" } } });
+
+    // The persisted schema is strict: a typo must fail loudly, like every other
+    // config field, rather than being coerced into a policy the user did not pick.
+    expect(() => loadConfig(home, { env: {} })).toThrow(/daemon\.git\.policy/);
+  });
+
+  test("getGitActivityPolicy falls back to auto for an unrecognized runtime value", () => {
+    expect(getGitActivityPolicy({ git: undefined } as never)).toBe("auto");
+    expect(getGitActivityPolicy({ git: { policy: "nonsense" } } as never)).toBe("auto");
+    expect(getGitActivityPolicy({ git: { policy: "enabled" } } as never)).toBe("enabled");
+  });
+
+  test("reload picks up a policy edit without a restart path", async () => {
+    const home = await createHome();
+    const startup = loadPersistedConfig(home);
+    await writeFile(
+      path.join(home, "config.json"),
+      JSON.stringify({ ...startup, daemon: { ...startup.daemon, git: { policy: "enabled" } } }),
+    );
+
+    const reloaded = loadConfig(home, { env: {} });
+    expect(reloaded.git?.policy).toBe("enabled");
+    expect(reloaded.configReload?.overrideControlledPaths).not.toContain("daemon.git.policy");
+  });
 });

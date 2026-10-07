@@ -1,6 +1,58 @@
 import type { CheckoutDiffResult } from "../../utils/checkout-git.js";
 import { deriveProjectSlug } from "../workspace-git-metadata.js";
 import type { WorkspaceGitRuntimeSnapshot, WorkspaceGitService } from "../workspace-git-service.js";
+import type { GitActivityPolicyService } from "../git-activity/policy.js";
+
+/**
+ * A policy service that admits everything. Default bare-service tests inject this
+ * explicitly rather than relying on mount detection, so their behaviour is
+ * independent of the host's real mounts.
+ */
+export function createAllowingGitActivityPolicy(): GitActivityPolicyService {
+  const state = {
+    configuredPolicy: "enabled",
+    effectiveMode: "automatic",
+    reason: "policy_enabled",
+    lastCheckedAt: null,
+  } as const;
+  return {
+    isAutomatic: () => true,
+    peek: () => ({ ...state }),
+    resolve: async () => ({ ...state }),
+    ensureClassification: async (cwd: string) => ({ cwd, automatic: false }),
+    refreshPolicy: () => {},
+    invalidate: () => {},
+    invalidateMountTable: () => {},
+    dispose: () => {},
+  };
+}
+
+/**
+ * A policy service that refuses all automatic work — the manual and unknown
+ * cases. `configuredPolicy` and `reason` are parameterised so a test can assert
+ * the projection the client would see.
+ */
+export function createManualGitActivityPolicy(options?: {
+  configuredPolicy?: "manual" | "auto";
+  reason?: string;
+}): GitActivityPolicyService {
+  const state = {
+    configuredPolicy: options?.configuredPolicy ?? "manual",
+    effectiveMode: "manual",
+    reason: options?.reason ?? "policy_manual",
+    lastCheckedAt: null,
+  } as const;
+  return {
+    isAutomatic: () => false,
+    peek: () => ({ ...state }),
+    resolve: async () => ({ ...state }),
+    ensureClassification: async (cwd: string) => ({ cwd, automatic: false }),
+    refreshPolicy: () => {},
+    invalidate: () => {},
+    invalidateMountTable: () => {},
+    dispose: () => {},
+  };
+}
 
 export function createNoGitWorkspaceRuntimeSnapshot(cwd: string): WorkspaceGitRuntimeSnapshot {
   return {
@@ -36,6 +88,9 @@ export function createNoopWorkspaceGitService(
       unsubscribe: () => {},
     }),
     onSnapshotUpdated: () => ({
+      unsubscribe: () => {},
+    }),
+    onGitActivityStateChanged: () => ({
       unsubscribe: () => {},
     }),
     peekSnapshot: () => null,
