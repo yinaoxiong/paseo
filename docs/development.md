@@ -5,6 +5,111 @@
 - Node.js (see `.tool-versions` for exact version)
 - npm workspaces (comes with Node)
 
+## Dependency and validation environment
+
+Run dependency installation, updates, formatting, linting, typechecking, tests,
+and build verification through the `devcontainer` CLI and the repository's
+`.devcontainer/devcontainer.json`. Do not run those commands on the host checkout
+or operate the development container through raw Docker commands.
+
+Use Git 2.48 or newer on the host and in the container for relative-path
+worktrees. The private container uses the official
+`mcr.microsoft.com/devcontainers/javascript-node:24-trixie` image with Node 24
+and preinstalled Git. Do not add the Git source-build Feature to this config.
+The project CI runtime remains defined by its existing Node configuration.
+
+Let the CLI choose the workspace mount and working directory. Keep
+`workspaceMount` and `workspaceFolder` unset: the CLI's common-directory mount
+currently skips configurations that set both ([upstream issue](https://github.com/devcontainers/cli/issues/1243)).
+Do not bind a machine-specific `.git` path.
+
+Create worktrees with relative links, then enable the common-directory mount on
+CLI commands. The flag is not automatically recovered from an existing container:
+
+```bash
+git worktree add --relative-paths -b <branch> /path/to/worktree <base>
+devcontainer up --workspace-folder /path/to/checkout --mount-git-worktree-common-dir true
+devcontainer exec --workspace-folder /path/to/checkout --mount-git-worktree-common-dir true \
+  git status --short --branch
+```
+
+Relative worktrees enable `extensions.relativeWorktrees` in the shared repository;
+all Git consumers of that repository must support it. Upgrade older Git clients
+before creating one. An existing absolute-path worktree can be converted with
+`git worktree repair --relative-paths /path/to/worktree` after upgrading.
+
+For worktrees created through Paseo, enable the default in the source repository
+after upgrading its Git consumers: `git config --local worktree.useRelativePaths true`.
+This also covers tools that invoke `git worktree add` without the explicit flag;
+keep the setting repository-local so it does not change unrelated repositories.
+
+The CLI starts `exec` commands in the resolved workspace directory. Do not add a
+fixed `cd /workspaces/paseo`. The container mounts each workspace `node_modules`
+under `${containerWorkspaceFolder}` into named volumes keyed by `${devcontainerId}`.
+Different checkouts get separate dependencies; rebuilding the same checkout
+reuses its volumes. All checkouts on the same Docker host share the local
+`paseo-npm-cache` volume at `/root/.npm`; installation prefers cached downloads
+and fetches missing packages. New worktrees still install their own dependencies.
+Build scratch stays on container-local disk. Do not clear the shared cache while
+another checkout is installing.
+
+```bash
+devcontainer exec --workspace-folder /path/to/checkout --mount-git-worktree-common-dir true \
+  npm run typecheck
+```
+
+When changing the mount layout or base image, recreate the development container
+through the CLI; starting an existing container does not apply new mounts or image
+layers. Old dependency volumes can be retained until the replacement passes checks.
+Container creation and startup run the dependency initializer. It reuses an
+installation only when the lockfile, workspace manifests, npm configuration,
+patches, bootstrap policy, and Node/npm/platform match the last successful run.
+Every dependency volume must retain its installation marker; losing a volume or
+an essential package triggers installation. The installation lock and final
+success record live in a separate checkout-specific state volume, outside npm's
+cleanup. A failed or interrupted installation leaves no valid success record.
+
+The initializer skips dependency lifecycle downloads and applies repository
+patches. Install the required runtime binaries separately for live terminals,
+Electron builds, or browser tests. A new worktree still needs its first install.
+
+After switching branches in a running container, run the initializer before
+checks: startup hooks do not run on checkout. Use `--check` to report whether an
+install is needed without installing (exit 1 when stale), or `--force` to reinstall:
+
+```bash
+devcontainer exec --workspace-folder /path/to/checkout --mount-git-worktree-common-dir true \
+  uv run --no-project --python /usr/bin/python3 /usr/local/lib/paseo-devcontainer/ensure-deps.py
+```
+
+The script is included in the image so `--config` also works with worktrees that
+exclude private files. Rebuild the container after changing the bootstrap script.
+
+Image builds use direct network access by default. After a connectivity failure,
+retry with host `http_proxy` and `https_proxy` set; the build forwards them as
+standard proxy build arguments. Proxy addresses are not stored in the config.
+
+### Private CLI tarballs
+
+Build private installable CLI packages through the devcontainer:
+
+```bash
+devcontainer exec --workspace-folder /path/to/checkout --mount-git-worktree-common-dir true \
+  node .planning/scripts/build-personal-cli-tarball.mjs --version 0.10.2+personal.3
+```
+
+Choose an unused private version. The script keeps staging, production dependencies,
+npm cache and temporary installation checks on container-local storage, then copies
+only the verified tarball to `.local-build` (or `--output-dir`). Existing tarballs
+are never overwritten. `--temp-dir` selects an existing local scratch parent;
+network/FUSE and unknown filesystem types are rejected. `--keep-staging` preserves
+scratch files locally for diagnosis, including after failure. Do not put build
+dependencies on the network-mounted checkout. Temporary installation checks do
+not install into the daily runtime or restart its daemon.
+
+Probe the specific tool you need instead of recursively scanning `node_modules`.
+If a first-time install appears stuck, check the npm process or npm logs.
+
 ## Running the dev server
 
 ```bash
@@ -152,6 +257,19 @@ isolated instance on non-default ports.
 When running a dedicated Electron QA instance against a non-default Expo port, set
 `EXPO_DEV_URL` explicitly. Desktop main defaults to `http://localhost:8081`, so
 `PASEO_PORT=57928` alone starts Metro on 57928 but Electron still loads 8081.
+
+### Personal macOS arm64 app directory from Linux
+
+For personal smoke packaging, Linux can assemble an unsigned macOS arm64 `.app`
+directory:
+
+```bash
+npm run desktop:mac:dir:arm64
+```
+
+The output is `packages/desktop/release/mac-arm64/Paseo.app`. It is unsigned and
+not notarized; use the macOS release workflow for distributable `.dmg` or `.zip`
+artifacts.
 
 ### React render profiling
 
