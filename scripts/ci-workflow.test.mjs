@@ -29,6 +29,18 @@ import {
 import { windowsInstallerArgs } from "./personal/windows-install.mjs";
 
 const repoRoot = new URL("../", import.meta.url);
+test("normal postinstall applies the upstream bounded NSIS per-user path copy", () => {
+  const require = createRequire(import.meta.url);
+  const template = readFileSync(
+    joinPath(require.resolve("app-builder-lib/package.json"), "../templates/nsis/multiUser.nsh"),
+    "utf8",
+  );
+  const macro = template.split("!macro setInstallModePerUser")[1].split("!macroend")[0];
+  assert.match(macro, /KERNEL32::lstrcpynW\(w \.r0, p r2, i \$\{NSIS_MAX_STRLEN\}\)p/);
+  assert.doesNotMatch(macro, /System::Store|&w\$\{NSIS_MAX_STRLEN\}/);
+  assert.match(macro, /Push \$1[\s\S]*Push \$2[\s\S]*Pop \$2[\s\S]*Pop \$1/);
+  assert.match(macro, /\$2 != 0[\s\S]*OLE32::CoTaskMemFree/);
+});
 test("npm fork keeps canonical imports, moves internal peers to explicit aliases and reuses upstream leaves", () => {
   const result = npmManifest(
     {

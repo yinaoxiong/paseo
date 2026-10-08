@@ -8,6 +8,12 @@ import { join, relative } from "node:path";
 // workspace root live in their workspace's own node_modules, and patch-package resolves
 // the patch's node_modules/... paths relative to its working directory.
 const patchedPackages = [
+  // Remove when the locked builder includes electron-userland/electron-builder#9769.
+  // Its old per-user path copy can crash NSIS before installation with 0xc0000005.
+  {
+    nodeModulesPath: "node_modules/app-builder-lib",
+    patchPrefix: "app-builder-lib+",
+  },
   {
     nodeModulesPath: "node_modules/react-native-markdown-display",
     patchPrefix: "react-native-markdown-display+",
