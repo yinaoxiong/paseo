@@ -11,6 +11,12 @@ export function npmManifest(original, version, upstream) {
   if (!npmPackages.includes(key)) throw new Error(`Unexpected private package ${key}`);
   manifest.name = npmName(key);
   manifest.version = version;
+  // npm provenance requires the public publishing repository, not the upstream fork source.
+  manifest.repository = {
+    type: "git",
+    url: "git+https://github.com/yinaoxiong/paseo.git",
+    directory: `packages/${key}`,
+  };
   for (const field of [
     "scripts",
     "devDependencies",
