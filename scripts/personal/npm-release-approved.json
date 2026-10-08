@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "repository": "yinaoxiong/paseo",
+  "buildWorkflowId": 377643758,
+  "buildRunId": "37776588373",
+  "payloadSource": "e1b46afdf20119fda886692c5884dcf2b123cab3",
+  "lockSha256": "84723a87cc274b35632fe2751de09b5d40160f4098fbc0fc0352214c8219ab30",
+  "version": "0.11.0-personal.1",
+  "registry": "https://registry.npmjs.org/",
+  "distTag": "latest",
+  "manifestSha256": "2ae3cfc712228e886fb0b2ece6b3832f8baa3d1917a567d1c60cee92bc75c3a7",
+  "packages": [
+    {
+      "key": "protocol",
+      "name": "@yinaoxiong/paseo-protocol",
+      "version": "0.11.0-personal.1",
+      "file": "yinaoxiong-paseo-protocol-0.11.0-personal.1.tgz",
+      "sha256": "0424fdef7fe11569a9e0fd907fec82c0e72119e9523e4b082eb17996d7afba4f",
+      "integrity": "sha512-BZ4dAGytx4pRcNfb47Vc5vNQS5ksQB7PabzS77m7zc3eP8+aqtkSGhQG7cAbV5YcUcdJkaEsHLyLiKU8mG4SWA==",
+      "bytes": 870262
+    },
+    {
+      "key": "client",
+      "name": "@yinaoxiong/paseo-client",
+      "version": "0.11.0-personal.1",
+      "file": "yinaoxiong-paseo-client-0.11.0-personal.1.tgz",
+      "sha256": "fd8563abf516b58ff4e66c2d321ae58103161d2741229a9e558bad61dc78b743",
+      "integrity": "sha512-F6Pfu17ekiBBkNnj0sW7JctzOUK0fL/cNzEvZ/gt/CbjFqlLuHXBTVjRQ9QDlwA6awgkQILq+lOTrV4a7NxhvQ==",
+      "bytes": 74590
+    },
+    {
+      "key": "plugin",
+      "name": "@yinaoxiong/paseo-plugin",
+      "version": "0.11.0-personal.1",
+      "file": "yinaoxiong-paseo-plugin-0.11.0-personal.1.tgz",
+      "sha256": "975c2beca2c4ce9010e409aa82bc06f9652058343eed145a0470fe82c6b985a3",
+      "integrity": "sha512-0mgTJGYB9udxikJIfRhfXOy13VcuCykXo/PdV+tcq52bRmNQooa9NGnVoef/ggaaVgsUbWoUVxSQx39Bu/joMg==",
+      "bytes": 35646
+    },
+    {
+      "key": "server",
+      "name": "@yinaoxiong/paseo-server",
+      "version": "0.11.0-personal.1",
+      "file": "yinaoxiong-paseo-server-0.11.0-personal.1.tgz",
+      "sha256": "2804d6a620e95c1d136be85889ad2cf02acef87b5ff6a9442e3596bed134664f",
+      "integrity": "sha512-4P3FSpdmZAeyvkDT4b6Dc1u5zlfAO1SB3ese9Mrqa6QHkVKhPJIlTRijEiwrqq2rmeTk5TR0xHnsdIPGpLGHEQ==",
+      "bytes": 16643401
+    },
+    {
+      "key": "cli",
+      "name": "@yinaoxiong/paseo-cli",
+      "version": "0.11.0-personal.1",
+      "file": "yinaoxiong-paseo-cli-0.11.0-personal.1.tgz",
+      "sha256": "a1906a07e41459902d325b53a4b804ae141e44f9ea30c20ef8cec915ed677cc3",
+      "integrity": "sha512-O2HNLCsBBXv3t8vINYOqncU+hLMjyank/9KTPOCT/3Jod+2mL2jNSZbOJ5P2AHRg+2invTObKH6qkeNFfTRfdA==",
+      "bytes": 124519
+    }
+  ],
+  "proofs": [
+    {
+      "target": "linux-x64",
+      "file": "verification-npm-linux-x64.json",
+      "sha256": "7bea3c94cf777e48a5a85c3e25893d1438eb47ef599e1ab1c0104ddb8e4c6f07"
+    },
+    {
+      "target": "macos-arm64",
+      "file": "verification-npm-macos-arm64.json",
+      "sha256": "8d19b48e62362c2fdc035eb8bce7e824c7ab2578975c06a4257db961b8082fcf"
+    },
+    {
+      "target": "windows-x64",
+      "file": "verification-npm-windows-x64.json",
+      "sha256": "8ee9f72851f87721f2845b252783eda4a2c123c81a576059d1656f0f20f9f7dd"
+    }
+  ]
+}

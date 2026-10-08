@@ -1,0 +1,163 @@
+name: Personal npm Publish
+run-name: Personal npm Publish ${{ inputs.marker }}
+on:
+  workflow_dispatch:
+    inputs:
+      marker:
+        description: Unique parent publication request marker.
+        type: string
+        required: true
+      confirmation:
+        description: "Required exact confirmation: PUBLISH @yinaoxiong 0.11.0-personal.1"
+        type: string
+        required: true
+      auth_mode:
+        description: Trusted OIDC after package setup, or approved first-publication bootstrap.
+        type: choice
+        options: [trusted, bootstrap]
+        default: trusted
+        required: true
+      operation_tokens:
+        description: JSON object of separate parent one-shot intent tokens for unpublished package keys.
+        type: string
+        required: true
+      confirmed_packages:
+        description: JSON array of package keys whose exact registry bytes the parent already verified.
+        type: string
+        default: "[]"
+permissions:
+  contents: read
+concurrency:
+  group: personal-npm-publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'yinaoxiong/paseo' && github.ref == 'refs/heads/personal/stable'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      PASEO_NPM_PUBLISH_MARKER: ${{ inputs.marker }}
+      PASEO_NPM_CONFIRMATION: ${{ inputs.confirmation }}
+      PASEO_NPM_AUTH_MODE: ${{ inputs.auth_mode }}
+      PASEO_NPM_OPERATION_TOKENS: ${{ inputs.operation_tokens }}
+      PASEO_NPM_CONFIRMED: ${{ inputs.confirmed_packages }}
+      NPM_CONFIG_CACHE: ${{ runner.temp }}/paseo-publisher-cache
+      NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/paseo-publisher.npmrc
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24.21.0"
+      - name: Prepare pinned publisher CLI without installing source dependencies
+        run: |
+          npm install -g npm@11.19.0 --ignore-scripts --no-audit --no-fund
+          printf '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n' > "$NPM_CONFIG_USERCONFIG"
+          chmod 600 "$NPM_CONFIG_USERCONFIG"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: personal-npm-candidates
+          path: .local-build/npm-publish-input
+          run-id: "37776588373"
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: personal-npm-proof-linux-x64
+          path: .local-build/npm-publish-input
+          run-id: "37776588373"
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: personal-npm-proof-macos-arm64
+          path: .local-build/npm-publish-input
+          run-id: "37776588373"
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: personal-npm-proof-windows-x64
+          path: .local-build/npm-publish-input
+          run-id: "37776588373"
+          github-token: ${{ github.token }}
+      - name: Verify exact accepted batch and trusted successful original build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/personal/publish-npm.mjs verify .local-build/npm-publish-input "$RUNNER_TEMP/paseo-npm-receipts"
+      - name: Publish protocol once from accepted bytes
+        id: publish_protocol
+        env:
+          NODE_AUTH_TOKEN: ${{ inputs.auth_mode == 'bootstrap' && secrets.PASEO_NPM_BOOTSTRAP_TOKEN || '' }}
+        run: node scripts/personal/publish-npm.mjs publish .local-build/npm-publish-input "$RUNNER_TEMP/paseo-npm-receipts" protocol
+      - name: Retain protocol result before another publication
+        if: always() && steps.publish_protocol.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: personal-npm-receipt-protocol-${{ inputs.marker }}
+          path: ${{ runner.temp }}/paseo-npm-receipts/*-protocol.json
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Publish client once from accepted bytes
+        id: publish_client
+        env:
+          NODE_AUTH_TOKEN: ${{ inputs.auth_mode == 'bootstrap' && secrets.PASEO_NPM_BOOTSTRAP_TOKEN || '' }}
+        run: node scripts/personal/publish-npm.mjs publish .local-build/npm-publish-input "$RUNNER_TEMP/paseo-npm-receipts" client
+      - name: Retain client result before another publication
+        if: always() && steps.publish_client.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: personal-npm-receipt-client-${{ inputs.marker }}
+          path: ${{ runner.temp }}/paseo-npm-receipts/*-client.json
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Publish plugin once from accepted bytes
+        id: publish_plugin
+        env:
+          NODE_AUTH_TOKEN: ${{ inputs.auth_mode == 'bootstrap' && secrets.PASEO_NPM_BOOTSTRAP_TOKEN || '' }}
+        run: node scripts/personal/publish-npm.mjs publish .local-build/npm-publish-input "$RUNNER_TEMP/paseo-npm-receipts" plugin
+      - name: Retain plugin result before another publication
+        if: always() && steps.publish_plugin.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: personal-npm-receipt-plugin-${{ inputs.marker }}
+          path: ${{ runner.temp }}/paseo-npm-receipts/*-plugin.json
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Publish server once from accepted bytes
+        id: publish_server
+        env:
+          NODE_AUTH_TOKEN: ${{ inputs.auth_mode == 'bootstrap' && secrets.PASEO_NPM_BOOTSTRAP_TOKEN || '' }}
+        run: node scripts/personal/publish-npm.mjs publish .local-build/npm-publish-input "$RUNNER_TEMP/paseo-npm-receipts" server
+      - name: Retain server result before another publication
+        if: always() && steps.publish_server.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: personal-npm-receipt-server-${{ inputs.marker }}
+          path: ${{ runner.temp }}/paseo-npm-receipts/*-server.json
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Publish cli once from accepted bytes
+        id: publish_cli
+        env:
+          NODE_AUTH_TOKEN: ${{ inputs.auth_mode == 'bootstrap' && secrets.PASEO_NPM_BOOTSTRAP_TOKEN || '' }}
+        run: node scripts/personal/publish-npm.mjs publish .local-build/npm-publish-input "$RUNNER_TEMP/paseo-npm-receipts" cli
+      - name: Retain cli result before another publication
+        if: always() && steps.publish_cli.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: personal-npm-receipt-cli-${{ inputs.marker }}
+          path: ${{ runner.temp }}/paseo-npm-receipts/*-cli.json
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Retain full preflight and partial-publication facts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: personal-npm-publication-${{ inputs.marker }}
+          path: ${{ runner.temp }}/paseo-npm-receipts/*
+          if-no-files-found: warn
+          retention-days: 90
