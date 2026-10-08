@@ -1,4 +1,12 @@
+FROM node:24.21.0-bookworm-slim AS node-runtime
 FROM reactnativecommunity/react-native-android:v20.1
+
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+RUN rm -rf /usr/local/lib/node_modules/npm
+COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+  && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+RUN /usr/local/bin/node --version && /usr/local/bin/npm --version
 
 ENV ANDROID_HOME=/opt/android
 ENV ANDROID_SDK_ROOT=/opt/android
