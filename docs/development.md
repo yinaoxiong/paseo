@@ -180,8 +180,10 @@ on `personal/stable`. Do not invoke the official npm/store/deployment release fl
 
 `Personal npm Publish` is manual and accepts only the committed, hash-pinned batch
 from a successful personal build. Publisher source and payload source are recorded
-separately; the publisher never rebuilds or repacks. Each of the five package versions
-has a separate parent submission intent and a durable result before the next package.
+separately; the publisher never rebuilds or repacks. Authentication uses official `actions/setup-node`; each package is published with
+standard `npm publish`. A small read-only preflight checks accepted files and source.
+Raw npm JSON is retained before the next package. Boss submission intents and registry
+reconciliation stay outside CI.
 After an uncertain result, reconcile the exact registry integrity before resuming;
 never rerun the entire publisher blindly or overwrite an immutable npm version.
 

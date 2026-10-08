@@ -65,38 +65,6 @@ function validateAcceptedProof(p, target) {
     throw new Error(`Invalid verification ${target}`);
 }
 
-export function validatePublicationRequest(approval, env) {
-  if (
-    env.GITHUB_REPOSITORY !== approval.repository ||
-    env.GITHUB_REF !== "refs/heads/personal/stable" ||
-    env.GITHUB_EVENT_NAME !== "workflow_dispatch" ||
-    env.GITHUB_WORKFLOW !== "Personal npm Publish" ||
-    !/^[a-f0-9]{40}$/.test(env.GITHUB_SHA ?? "") ||
-    !/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID ?? "") ||
-    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(env.PASEO_NPM_PUBLISH_MARKER ?? "") ||
-    env.PASEO_NPM_CONFIRMATION !== "PUBLISH @yinaoxiong 0.11.0-personal.1" ||
-    !["trusted", "bootstrap"].includes(env.PASEO_NPM_AUTH_MODE)
-  )
-    throw new Error("Unapproved publication context or confirmation");
-  return validateRecoverySelection(env);
-}
-
-function validateRecoverySelection(env) {
-  const confirmed = JSON.parse(env.PASEO_NPM_CONFIRMED ?? "[]");
-  const tokens = JSON.parse(env.PASEO_NPM_OPERATION_TOKENS ?? "{}");
-  if (
-    !Array.isArray(confirmed) ||
-    new Set(confirmed).size !== confirmed.length ||
-    confirmed.some((key) => !publicationKeys.includes(key)) ||
-    Object.keys(tokens).some((key) => !publicationKeys.includes(key) || confirmed.includes(key))
-  )
-    throw new Error("Invalid partial-publication recovery selection");
-  for (const key of publicationKeys.filter((entry) => !confirmed.includes(entry)))
-    if (!/^[a-f0-9]{32}$/.test(tokens[key] ?? ""))
-      throw new Error(`Missing one-shot intent token ${key}`);
-  return { confirmed, tokens };
-}
-
 export function assertRegistryVersion(value, accepted) {
   if (
     value?.name !== accepted.name ||
