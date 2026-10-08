@@ -139,6 +139,10 @@ updater installation are disabled so official releases cannot replace the custom
 The builder configuration points only at the fork and never publishes during a build.
 
 The Mac archive uses an ad-hoc signature and is not notarized. Windows NSIS is unsigned.
+The locked Windows builder needs the upstream NSIS per-user path-copy repair
+(electron-builder #9769); normal postinstall applies it. Remove that patch only
+after the locked builder contains the fix. An installation crash is a failed
+package acceptance, even when installer compilation succeeded.
 Each final archive or installer is extracted or installed to a temporary directory,
 then checked through the existing real renderer/bridge/daemon/Terminal smoke harness.
 Mac smoke is called directly after archive extraction, independent of signing hooks.
