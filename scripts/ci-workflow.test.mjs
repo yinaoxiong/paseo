@@ -29,13 +29,12 @@ import {
 import { windowsInstallerArgs } from "./personal/windows-install.mjs";
 import {
   validateNpmApproval,
-  validatePublicationRequest,
   assertRegistryVersion,
   parseNpmPublishResult,
 } from "./personal/npm-publication.mjs";
 
 const repoRoot = new URL("../", import.meta.url);
-test("publisher admits only the fixed personal batch and explicit recoverable package selection", () => {
+test("publisher admits only the fixed personal batch and validates standard npm responses", () => {
   const accepted = JSON.parse(
     readFileSync(new URL("./personal/npm-release-approved.json", import.meta.url)),
   );
@@ -46,48 +45,6 @@ test("publisher admits only the fixed personal batch and explicit recoverable pa
   assert.throws(
     () => validateNpmApproval({ ...accepted, registry: "https://example.com/" }),
     /Invalid accepted/,
-  );
-  const env = {
-    GITHUB_REPOSITORY: "yinaoxiong/paseo",
-    GITHUB_REF: "refs/heads/personal/stable",
-    GITHUB_EVENT_NAME: "workflow_dispatch",
-    GITHUB_WORKFLOW: "Personal npm Publish",
-    GITHUB_SHA: accepted.payloadSource,
-    GITHUB_RUN_ID: "123",
-    PASEO_NPM_PUBLISH_MARKER: "approved-batch-123",
-    PASEO_NPM_CONFIRMATION: "PUBLISH @yinaoxiong 0.11.0-personal.1",
-    PASEO_NPM_AUTH_MODE: "trusted",
-    PASEO_NPM_OPERATION_TOKENS: JSON.stringify(
-      Object.fromEntries(accepted.packages.map((p) => [p.key, "a".repeat(32)])),
-    ),
-    PASEO_NPM_CONFIRMED: "[]",
-  };
-  assert.equal(Object.keys(validatePublicationRequest(accepted, env).tokens).length, 5);
-  assert.throws(
-    () => validatePublicationRequest(accepted, { ...env, GITHUB_REF: "refs/heads/untrusted" }),
-    /Unapproved/,
-  );
-  assert.throws(
-    () => validatePublicationRequest(accepted, { ...env, GITHUB_EVENT_NAME: "pull_request" }),
-    /Unapproved/,
-  );
-  assert.throws(
-    () => validatePublicationRequest(accepted, { ...env, PASEO_NPM_OPERATION_TOKENS: "{}" }),
-    /Missing one-shot/,
-  );
-  assert.throws(
-    () => validatePublicationRequest(accepted, { ...env, PASEO_NPM_CONFIRMED: '["protocol"]' }),
-    /Invalid partial/,
-  );
-  const tokens = JSON.parse(env.PASEO_NPM_OPERATION_TOKENS);
-  delete tokens.protocol;
-  assert.deepEqual(
-    validatePublicationRequest(accepted, {
-      ...env,
-      PASEO_NPM_CONFIRMED: '["protocol"]',
-      PASEO_NPM_OPERATION_TOKENS: JSON.stringify(tokens),
-    }).confirmed,
-    ["protocol"],
   );
   const p = accepted.packages[0];
   const response = {
@@ -116,6 +73,10 @@ test("npm publisher keeps publication manual, file-pinned and receipts between p
   );
   assert.deepEqual(Object.keys(workflow.on), ["workflow_dispatch"]);
   const job = workflow.jobs.publish;
+  assert.doesNotMatch(JSON.stringify(job.env), /\$\{\{\s*runner\./);
+  const setup = job.steps.find((step) => step.uses?.startsWith("actions/setup-node@"));
+  assert.equal(setup.with["registry-url"], "https://registry.npmjs.org");
+  assert.equal(workflow.on.workflow_dispatch.inputs.operation_tokens, undefined);
   assert.equal(job.permissions["contents"], "read");
   assert.equal(job.permissions["actions"], "read");
   assert.equal(job.permissions["id-token"], "write");
@@ -125,6 +86,8 @@ test("npm publisher keeps publication manual, file-pinned and receipts between p
     ["publish_protocol", "publish_client", "publish_plugin", "publish_server", "publish_cli"],
   );
   for (const step of publish) {
+    assert.match(step.run, /npm publish/);
+    assert.doesNotMatch(step.run, /publish-npm\.mjs/);
     const next = job.steps[job.steps.indexOf(step) + 1];
     assert.match(next.uses, /^actions\/upload-artifact@/);
     assert.match(next.if, /always\(\)/);
