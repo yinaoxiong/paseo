@@ -36,10 +36,16 @@ vi.mock("electron-updater", () => ({
   autoUpdater: autoUpdaterMock,
 }));
 
+// Keep the unit adapter from loading Electron's self-downloading Node entrypoint
+// through electron-log's CommonJS require. Native package smoke uses the real logger.
+vi.mock("electron-log/main", () => ({ default: { info: vi.fn() } }));
+
 import {
   bucketFromStagingUserId,
   checkForAppUpdate,
   createAppUpdateLifecycleLogger,
+  downloadAndInstallUpdate,
+  installAppUpdateOnQuit,
   resolveStagingUserId,
   rolloutManifestSchema,
   shouldAdmitToRollout,
@@ -47,6 +53,40 @@ import {
 } from "./auto-updater";
 
 describe("checkForAppUpdate", () => {
+  it("keeps personal builds off upstream update feeds and installers", async () => {
+    const currentVersion = "0.11.0+personal.1";
+    autoUpdaterMock.checkForUpdates.mockClear();
+    autoUpdaterMock.downloadUpdate.mockClear();
+    expect(
+      await checkForAppUpdate({ currentVersion, releaseChannel: "stable", intent: "automatic" }),
+    ).toEqual({
+      hasUpdate: false,
+      readyToInstall: false,
+      currentVersion,
+      latestVersion: currentVersion,
+      body: null,
+      date: null,
+      errorMessage: null,
+    });
+    expect(
+      (await checkForAppUpdate({ currentVersion, releaseChannel: "stable", intent: "manual" }))
+        .errorMessage,
+    ).toBe("Personal builds are updated manually from the fork's releases.");
+    expect(await downloadAndInstallUpdate({ currentVersion, releaseChannel: "stable" })).toEqual({
+      installed: false,
+      version: null,
+      message: "Personal builds are updated manually from the fork's releases.",
+    });
+    expect(
+      await installAppUpdateOnQuit({
+        currentVersion,
+        releaseChannel: "stable",
+        signal: new AbortController().signal,
+      }),
+    ).toBe(false);
+    expect(autoUpdaterMock.checkForUpdates).not.toHaveBeenCalled();
+    expect(autoUpdaterMock.downloadUpdate).not.toHaveBeenCalled();
+  });
   it("treats an unpublished channel manifest as an unavailable update", async () => {
     const error = Object.assign(new Error("Cannot find latest-mac.yml"), {
       code: "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND",

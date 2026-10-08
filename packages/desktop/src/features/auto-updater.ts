@@ -251,6 +251,20 @@ export async function checkForAppUpdate({
   releaseChannel: AppReleaseChannel;
   intent: AppUpdateCheckIntent;
 }): Promise<AppUpdateCheckResult> {
+  if (/\+personal\.\d+$/.test(currentVersion)) {
+    return {
+      hasUpdate: false,
+      readyToInstall: false,
+      currentVersion,
+      latestVersion: currentVersion,
+      body: null,
+      date: null,
+      errorMessage:
+        intent === "manual"
+          ? "Personal builds are updated manually from the fork's releases."
+          : null,
+    };
+  }
   updateLifecycleLog.checkStarted({ currentVersion, releaseChannel, intent });
   const result = await appUpdateService.checkForAppUpdate({
     currentVersion,
@@ -279,6 +293,13 @@ export async function downloadAndInstallUpdate(
   },
   onBeforeQuit?: () => Promise<void>,
 ): Promise<AppUpdateInstallResult> {
+  if (/\+personal\.\d+$/.test(currentVersion)) {
+    return {
+      installed: false,
+      version: null,
+      message: "Personal builds are updated manually from the fork's releases.",
+    };
+  }
   return appUpdateService.downloadAndInstallUpdate(
     { currentVersion, releaseChannel },
     onBeforeQuit,
@@ -294,6 +315,7 @@ export async function installAppUpdateOnQuit({
   releaseChannel: AppReleaseChannel;
   signal: AbortSignal;
 }): Promise<boolean> {
+  if (/\+personal\.\d+$/.test(currentVersion)) return false;
   if (
     !shouldInstallAppUpdateOnQuit({
       platform: process.platform,
