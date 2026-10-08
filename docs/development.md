@@ -11,6 +11,9 @@ Run dependency installation, updates, formatting, linting, typechecking, tests,
 and build verification through the `devcontainer` CLI and the repository's
 `.devcontainer/devcontainer.json`. Do not run those commands on the host checkout
 or operate the development container through raw Docker commands.
+The personal macOS arm64 and Windows x64 jobs are the native-runner exception:
+they use the same committed build scripts on GitHub-hosted runners. Android uses
+the dedicated builder described in [android.md](android.md).
 
 Use Git 2.48 or newer on the host and in the container for relative-path
 worktrees. The private container uses the official
@@ -89,26 +92,86 @@ Image builds use direct network access by default. After a connectivity failure,
 retry with host `http_proxy` and `https_proxy` set; the build forwards them as
 standard proxy build arguments. Proxy addresses are not stored in the config.
 
-### Private CLI tarballs
+### Personal npm packages
 
-Build private installable CLI packages through the devcontainer:
+Build the five online CLI/runtime candidates through the devcontainer:
 
 ```bash
 devcontainer exec --workspace-folder /path/to/checkout --mount-git-worktree-common-dir true \
-  node .planning/scripts/build-personal-cli-tarball.mjs --version 0.10.2+personal.3
+  npm run personal:cli -- --revision 1
 ```
 
-Choose an unused private version. The script keeps staging, production dependencies,
-npm cache and temporary installation checks on container-local storage, then copies
-only the verified tarball to `.local-build` (or `--output-dir`). Existing tarballs
-are never overwritten. `--temp-dir` selects an existing local scratch parent;
-network/FUSE and unknown filesystem types are rejected. `--keep-staging` preserves
-scratch files locally for diagnosis, including after failure. Do not put build
-dependencies on the network-mounted checkout. Temporary installation checks do
-not install into the daily runtime or restart its daemon.
+The source workspaces retain their upstream names. Publishing maps CLI, server,
+protocol, client and plugin to `@yinaoxiong/paseo-*`; canonical SDK imports remain
+supported through dependency aliases. Private internal peers are explicit dependencies
+in the published plugin, because an alias is not a peer version range. Official
+relay and highlight are pinned to the unchanged upstream version.
+
+The same JavaScript archives serve Linux x64, Mac arm64 and Windows x64 with Node 24.
+Third-party dependencies install normally on the target OS. Only the existing patched
+pure-JavaScript OpenCode SDK is bundled with server; native dependencies must use their
+published prebuilds. npm versions use `<base>-personal.<revision>` while desktop and
+Android retain `<base>+personal.<revision>`.
+
+Before npm publication, install all five candidate archives through a temporary,
+loopback registry and verify their actual npm entries, package identities, isolated
+daemon, plugin resolution and strict Terminal execution receipts. Installation has
+its own duration budget and phase logs. Unpublished candidates do not provide a
+self-contained CLI installation against npmjs.com.
+
+Staging, dependencies, caches and installation prefixes stay on verified local
+storage. Only candidate archives and provenance/checksum manifests go to the output
+directory. Existing batches are not overwritten. Preserve failed-install archives
+for a targeted verification of the same bytes. Never install over the daily runtime
+or restart its daemon for smoke tests.
 
 Probe the specific tool you need instead of recursively scanning `node_modules`.
-If a first-time install appears stuck, check the npm process or npm logs.
+Check npm processes or npm logs for dependency progress.
+
+### Personal desktop packages
+
+Use `npm run personal:desktop -- <revision> <output-directory>` on the corresponding
+native GitHub runner. Desktop identity, application data location and daemon behavior
+stay the same. Personal versions use manual updates; both automatic and requested
+updater installation are disabled so official releases cannot replace the custom build.
+The builder configuration points only at the fork and never publishes during a build.
+
+The Mac archive uses an ad-hoc signature and is not notarized. Windows NSIS is unsigned.
+Each final archive or installer is extracted or installed to a temporary directory,
+then checked through the existing real renderer/bridge/daemon/Terminal smoke harness.
+Mac smoke is called directly after archive extraction, independent of signing hooks.
+Only verified files and their manifests go to the output directory.
+
+### Personal fork CI
+
+The public fork runs `Personal Checks` on personal branches/PRs and `Personal Build`
+only on manual dispatch. `cli-only` validates three standalone CLI archives without
+desktop/APK builds or signing credentials; `all` builds the six final installers.
+The existing Mac archive verification mode still reuses the accepted archive. Builds accept a full source SHA and personal revision;
+the resolver admits only commits in the validated personal lineage and current
+`personal/stable`. Signing credentials are not exposed to PR checks.
+
+Linux checks/CLI use DevContainer; standalone Mac arm64/Windows x64 CLI and desktop
+packages use native Node 24 runners, and Android uses
+the dedicated builder. Node 24.21.0/npm 11.19.0, action SHAs and the Linux DevContainer
+image digest are pinned. Android base images use version tags; manifests record the
+actual builder image ID, so future rebuilds are not claimed to be byte-reproducible.
+Standalone CLI tarballs are platform-specific and fully bundled: Linux x64, macOS
+arm64 and Windows x64. Install the matching archive with Node 24; no desktop App
+or native build toolchain is required. Production dependencies are prepared from
+the lockfile on each target with Node, separately from Electron ABI rebuilds.
+Each final tgz must pass empty-cache offline npm installation through its generated
+entry, an isolated daemon and Terminal execution, including paths with spaces.
+
+Caches contain downloads or Android toolchain data,
+never shared `node_modules` or signing material. A small added-line credential check
+does not certify historical content as secret-free.
+
+Use a unique dispatch marker and preserve its run ID. Artifacts expire after 14 days.
+Download and verify manifests/checksums before release; public Release publication
+uses the accepted files and requires explicit approval for that version/file set.
+Keep inherited deployment/release workflows disabled and the fork default branch
+on `personal/stable`. Do not invoke the official npm/store/deployment release flow.
 
 ## Running the dev server
 

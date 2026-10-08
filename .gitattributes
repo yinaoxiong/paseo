@@ -1,0 +1,4 @@
+# npm normalizes workspace executable shebangs during installation.
+packages/cli/bin/paseo text eol=lf
+package-lock.json text eol=lf
+package.json text eol=lf

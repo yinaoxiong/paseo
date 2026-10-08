@@ -1,0 +1,22 @@
+name: Personal native Node toolchain
+description: Pinned Node/npm and repository patches for native desktop runners.
+inputs:
+  desktop:
+    default: "false"
+    description: Install Electron's actual runtime binary.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: "24.21.0"
+        cache: npm
+    - shell: bash
+      run: npm install -g npm@11.19.0 --ignore-scripts --no-audit --no-fund
+    - shell: bash
+      run: npm ci --ignore-scripts --no-audit --no-fund
+    - shell: bash
+      run: npm run postinstall
+    - if: inputs.desktop == 'true'
+      shell: bash
+      run: node node_modules/electron/install.js

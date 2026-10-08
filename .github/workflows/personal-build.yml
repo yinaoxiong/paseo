@@ -1,0 +1,299 @@
+name: Personal Build
+run-name: Personal Build ${{ inputs.marker }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Optional full SHA in approved personal/stable lineage; blank uses this workflow commit.
+        type: string
+        default: ""
+      revision:
+        description: Personal revision 1–999 for the upstream stable base.
+        type: string
+        default: "1"
+        required: true
+      marker:
+        description: Unique request marker (letters, digits, dot, dash, underscore).
+        type: string
+        required: true
+      build_scope:
+        description: Build five npm packages and native installers, or only verify online CLI installation.
+        type: choice
+        options: [all, online-verify]
+        default: all
+        required: true
+      npm_candidate_run_id:
+        description: Optional earlier successful candidate build job to reverify without recompilation.
+        type: string
+        default: ""
+      npm_candidate_manifest_sha256:
+        description: Independently accepted exact npm batch manifest SHA256.
+        type: string
+        default: ""
+      mac_archive_run_id:
+        description: Optional successful personal build Run ID to reverify its existing Mac archive instead of rebuilding installers.
+        type: string
+        default: ""
+      mac_archive_sha256:
+        description: Independently accepted SHA-256 of that existing Mac archive.
+        type: string
+        default: ""
+permissions:
+  contents: read
+concurrency:
+  group: personal-build-${{ inputs.marker }}
+  cancel-in-progress: false
+env:
+  PASEO_BUILD_MARKER: ${{ inputs.marker }}
+jobs:
+  resolve:
+    permissions:
+      contents: read
+      actions: read
+    if: github.repository == 'yinaoxiong/paseo'
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      revision: ${{ steps.resolve.outputs.revision }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24.21.0"
+      - id: resolve
+        env:
+          PASEO_SOURCE_SHA: ${{ inputs.source_sha }}
+          PASEO_PERSONAL_REVISION: ${{ inputs.revision }}
+        run: node scripts/personal/resolve-source.mjs
+      - name: Admit an existing candidate build when requested
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PASEO_SOURCE_SHA: ${{ steps.resolve.outputs.sha }}
+          PASEO_BUILD_SCOPE: ${{ inputs.build_scope }}
+          PASEO_NPM_CANDIDATE_RUN_ID: ${{ inputs.npm_candidate_run_id }}
+          PASEO_NPM_CANDIDATE_MANIFEST_SHA256: ${{ inputs.npm_candidate_manifest_sha256 }}
+          PASEO_MAC_ARCHIVE_RUN_ID: ${{ inputs.mac_archive_run_id }}
+        run: node scripts/personal/resolve-npm-candidate.mjs
+  cli:
+    if: inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == ''
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24.21.0"
+      - name: Prepare CLI and local cache
+        run: |
+          npm install -g npm@11.19.0 @devcontainers/cli@0.87.0 --ignore-scripts --no-audit --no-fund
+          node scripts/personal/prepare-ci-container.mjs
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/paseo-npm-cache
+          key: personal-npm-linux-x64-node24.21.0-npm11.19.0-${{ hashFiles('package-lock.json') }}
+      - run: devcontainer up --workspace-folder "$GITHUB_WORKSPACE" --override-config "$RUNNER_TEMP/paseo-personal-ci-devcontainer.json" --mount-git-worktree-common-dir true
+      - env:
+          REVISION: ${{ needs.resolve.outputs.revision }}
+        run: devcontainer exec --workspace-folder "$GITHUB_WORKSPACE" --override-config "$RUNNER_TEMP/paseo-personal-ci-devcontainer.json" --mount-git-worktree-common-dir true npm run personal:cli -- --revision "$REVISION" --output-dir .local-build/personal-ci
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: personal-npm-candidates
+          path: .local-build/personal-ci/*
+          if-no-files-found: error
+          retention-days: 14
+  npm-install:
+    permissions:
+      contents: read
+      actions: read
+    if: ${{ !cancelled() && inputs.mac_archive_run_id == '' && needs.resolve.result == 'success' && (needs.cli.result == 'success' || inputs.npm_candidate_run_id != '') }}
+    needs: [resolve, cli]
+    env:
+      PASEO_NPM_CANDIDATE_RUN_ID: ${{ inputs.npm_candidate_run_id }}
+      PASEO_NPM_CANDIDATE_MANIFEST_SHA256: ${{ inputs.npm_candidate_manifest_sha256 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x64
+          - runner: macos-14
+            target: macos-arm64
+          - runner: windows-2025
+            target: windows-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24.21.0"
+      - shell: bash
+        run: npm install -g npm@11.19.0 --ignore-scripts --no-audit --no-fund
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: personal-npm-candidates
+          path: .local-build/npm-input
+          run-id: ${{ inputs.npm_candidate_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Prepare Linux verification container without workspace dependencies
+        if: runner.os == 'Linux'
+        env:
+          PASEO_NPM_VERIFY_ONLY: "true"
+        run: |
+          npm install -g @devcontainers/cli@0.87.0 --ignore-scripts --no-audit --no-fund
+          node scripts/personal/prepare-ci-container.mjs
+          devcontainer up --workspace-folder "$GITHUB_WORKSPACE" --override-config "$RUNNER_TEMP/paseo-personal-ci-devcontainer.json" --mount-git-worktree-common-dir true
+      - name: Verify exact online candidates on Linux
+        if: runner.os == 'Linux'
+        run: devcontainer exec --workspace-folder "$GITHUB_WORKSPACE" --override-config "$RUNNER_TEMP/paseo-personal-ci-devcontainer.json" --mount-git-worktree-common-dir true npm run personal:validate:npm -- .local-build/npm-input .local-build/npm-proof/verification-npm-linux-x64.json
+      - name: Verify exact online candidates on native Node
+        if: runner.os != 'Linux'
+        shell: bash
+        run: npm run personal:validate:npm -- .local-build/npm-input .local-build/npm-proof/verification-npm-${{ matrix.target }}.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: personal-npm-proof-${{ matrix.target }}
+          path: .local-build/npm-proof/*
+          if-no-files-found: warn
+          retention-days: 14
+  desktop:
+    if: inputs.mac_archive_run_id == '' && inputs.build_scope == 'all'
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: macos-arm64
+          - runner: windows-2025
+            target: windows-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/personal-node
+        with:
+          desktop: "true"
+      - shell: bash
+        env:
+          REVISION: ${{ needs.resolve.outputs.revision }}
+        run: npm run personal:desktop -- "$REVISION" .local-build/personal-ci
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: personal-${{ matrix.target }}
+          path: .local-build/personal-ci/*
+          if-no-files-found: error
+          retention-days: 14
+  android:
+    if: inputs.mac_archive_run_id == '' && inputs.build_scope == 'all'
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24.21.0"
+      - name: Prepare dedicated builder
+        run: |
+          npm install -g npm@11.19.0 --ignore-scripts --no-audit --no-fund
+          mkdir -p "$RUNNER_TEMP/paseo-android-npm" "$RUNNER_TEMP/paseo-android-gradle"
+          # Dedicated builder contains Android/Java tooling; free duplicate runner tools.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          # Hermes can exceed physical RAM even without concurrent native compilation.
+          sudo fallocate -l 16G "$RUNNER_TEMP/paseo-android.swap"
+          sudo chmod 600 "$RUNNER_TEMP/paseo-android.swap"
+          sudo mkswap "$RUNNER_TEMP/paseo-android.swap"
+          sudo swapon "$RUNNER_TEMP/paseo-android.swap"
+          free -h
+          swapon --show
+      - id: android-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ runner.temp }}/paseo-android-npm
+            ${{ runner.temp }}/paseo-android-gradle
+          key: personal-android-linux-x64-node24.21.0-${{ hashFiles('package-lock.json', 'docker/android-builder/Dockerfile') }}
+      - name: Build dedicated image
+        run: |
+          npm run android:builder:image
+      - name: Build and verify APK
+        env:
+          REVISION: ${{ needs.resolve.outputs.revision }}
+          PASEO_ANDROID_KEYSTORE_B64: ${{ secrets.PASEO_ANDROID_KEYSTORE_B64 }}
+          PASEO_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.PASEO_ANDROID_KEYSTORE_PASSWORD }}
+          PASEO_ANDROID_NPM_CACHE: ${{ runner.temp }}/paseo-android-npm
+          PASEO_ANDROID_GRADLE_CACHE: ${{ runner.temp }}/paseo-android-gradle
+        run: |
+          set -euo pipefail
+          signing_dir=$(mktemp -d "$RUNNER_TEMP/paseo-signing.XXXXXX")
+          trap 'rm -rf "$signing_dir"' EXIT
+          printf '%s' "$PASEO_ANDROID_KEYSTORE_B64" | base64 -d > "$signing_dir/key.p12"
+          chmod 600 "$signing_dir/key.p12"
+          unset PASEO_ANDROID_KEYSTORE_B64
+          PASEO_ANDROID_KEYSTORE="$signing_dir/key.p12" npm run personal:android -- "$REVISION" .local-build/personal-ci
+      - name: Preserve dependency/toolchain downloads after a failed build
+        if: always() && steps.android-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ runner.temp }}/paseo-android-npm
+            ${{ runner.temp }}/paseo-android-gradle
+          key: ${{ steps.android-cache.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: personal-android-arm64
+          path: .local-build/personal-ci/*
+          if-no-files-found: error
+          retention-days: 14
+  mac-archive-verification:
+    if: inputs.mac_archive_run_id != ''
+    needs: resolve
+    runs-on: macos-14
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/personal-node
+      - name: Build smoke dependencies
+        run: npm run build:server
+      - name: Verify the existing final Mac archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PASEO_PERSONAL_REVISION: ${{ needs.resolve.outputs.revision }}
+          PASEO_MAC_ARCHIVE_RUN_ID: ${{ inputs.mac_archive_run_id }}
+          PASEO_MAC_ARCHIVE_SHA256: ${{ inputs.mac_archive_sha256 }}
+          PASEO_MAC_ARCHIVE_DIR: ${{ runner.temp }}/mac-archive-input
+          PASEO_MAC_VERIFICATION_OUTPUT: ${{ runner.temp }}/mac-archive-proof
+        run: |
+          gh run download "$PASEO_MAC_ARCHIVE_RUN_ID" --repo yinaoxiong/paseo --name personal-macos-arm64 --dir "$PASEO_MAC_ARCHIVE_DIR"
+          node scripts/personal/verify-mac-archive.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: personal-mac-archive-verification
+          path: ${{ runner.temp }}/mac-archive-proof/*
+          if-no-files-found: error
+          retention-days: 14
