@@ -4,9 +4,33 @@ const {
   FDROID_ABI_VERSION_CODE_SUFFIXES,
   getFdroidVersionCodes,
   getNativeReleaseVersion,
+  getPersonalNativeReleaseVersion,
 } = require("./native-release-version");
 
 describe("native release version", () => {
+  it("orders personal revisions below the next upstream patch", () => {
+    expect(getPersonalNativeReleaseVersion("0.11.0", 1)).toEqual({
+      appVersion: "0.11.0",
+      androidVersionCode: 11000001,
+      iosBuildNumber: "11000999",
+    });
+    expect(getPersonalNativeReleaseVersion("0.11.0", 999).androidVersionCode).toBeLessThan(
+      getPersonalNativeReleaseVersion("0.11.1", 1).androidVersionCode,
+    );
+    expect(getPersonalNativeReleaseVersion("0.11.1", 999).androidVersionCode).toBeLessThan(
+      getPersonalNativeReleaseVersion("0.12.0", 1).androidVersionCode,
+    );
+  });
+  it("rejects colliding revisions, unstable bases and Android overflow", () => {
+    for (const revision of [0, 1000, -1, 1.5, NaN]) {
+      expect(() => getPersonalNativeReleaseVersion("0.11.0", revision)).toThrow(
+        "Personal revision",
+      );
+    }
+    expect(() => getPersonalNativeReleaseVersion("0.11.0+personal.1", 1)).toThrow("stable version");
+    expect(() => getPersonalNativeReleaseVersion("0.11.0-beta.1", 1)).toThrow("stable version");
+    expect(() => getPersonalNativeReleaseVersion("3.0.0", 1)).toThrow("out of range");
+  });
   it("reserves the final iOS build slot for a stable release", () => {
     expect(getNativeReleaseVersion("0.2.6")).toEqual({
       appVersion: "0.2.6",
