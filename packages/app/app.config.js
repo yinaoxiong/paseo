@@ -6,8 +6,12 @@ const withAndroidProfileable = require("./plugins/with-android-profileable");
 const withFdroidAutolinking = require("./plugins/with-fdroid-autolinking");
 const withPasteInput = require("./plugins/with-paste-input");
 const withAndroidScroll = require("./modules/paseo-scroll/app.plugin");
-const { getNativeReleaseVersion } = require("./native-release-version");
+const {
+  getNativeReleaseVersion,
+  getPersonalNativeReleaseVersion,
+} = require("./native-release-version");
 const appVariant = process.env.APP_VARIANT ?? "production";
+const isPersonalBuild = appVariant === "personal";
 const isFdroidBuild = process.env.PASEO_FDROID_BUILD === "1";
 const isProfileBuild = process.env.PASEO_PROFILE_BUILD === "1";
 
@@ -66,6 +70,14 @@ function resolveSecretFile(params) {
 }
 
 const variants = {
+  personal: {
+    name: "Paseo Personal",
+    packageId: "sh.paseo.personal",
+    googleServicesFile: resolveSecretFile({
+      envKey: "GOOGLE_SERVICES_FILE_PERSONAL",
+      fallbackRelativePath: "./.secrets/google-services.personal.json",
+    }),
+  },
   production: {
     name: "Paseo",
     packageId: "sh.paseo",
@@ -93,7 +105,9 @@ const variants = {
 };
 
 const variant = variants[appVariant] ?? variants.production;
-const nativeReleaseVersion = getNativeReleaseVersion(pkg.version);
+const nativeReleaseVersion = isPersonalBuild
+  ? getPersonalNativeReleaseVersion(pkg.version, Number(process.env.PASEO_PERSONAL_REVISION))
+  : getNativeReleaseVersion(pkg.version);
 
 export default {
   expo: {
@@ -101,8 +115,8 @@ export default {
     slug: "voice-mobile",
     version: nativeReleaseVersion.appVersion,
     orientation: "portrait",
-    icon: "./assets/images/icon.png",
-    scheme: "paseo",
+    icon: isPersonalBuild ? "./assets/images/personal-icon.png" : "./assets/images/icon.png",
+    scheme: isPersonalBuild ? "paseo-personal" : "paseo",
     userInterfaceStyle: "automatic",
     newArchEnabled: true,
     ios: {
@@ -120,7 +134,9 @@ export default {
     android: {
       adaptiveIcon: {
         backgroundColor: "#000000",
-        foregroundImage: "./assets/images/android-icon-foreground.png",
+        foregroundImage: isPersonalBuild
+          ? "./assets/images/personal-adaptive-icon.png"
+          : "./assets/images/android-icon-foreground.png",
       },
       edgeToEdgeEnabled: true,
       predictiveBackGestureEnabled: false,
@@ -189,10 +205,8 @@ export default {
       fdroidBuild: isFdroidBuild,
       profileBuild: isProfileBuild,
       router: {},
-      eas: {
-        projectId: "0e7f65ce-0367-46c8-a238-2b65963d235a",
-      },
+      ...(!isPersonalBuild ? { eas: { projectId: "0e7f65ce-0367-46c8-a238-2b65963d235a" } } : {}),
     },
-    owner: "getpaseo",
+    ...(!isPersonalBuild ? { owner: "getpaseo" } : {}),
   },
 };

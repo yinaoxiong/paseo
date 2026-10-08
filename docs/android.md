@@ -4,12 +4,30 @@
 
 Controlled by `APP_VARIANT` in `packages/app/app.config.js` (vanilla Expo, no custom Gradle plugin):
 
-| Variant       | App name    | Package ID       |
-| ------------- | ----------- | ---------------- |
-| `production`  | Paseo       | `sh.paseo`       |
-| `development` | Paseo Debug | `sh.paseo.debug` |
+| Variant       | App name                 | Package ID          |
+| ------------- | ------------------------ | ------------------- |
+| `production`  | Paseo                    | `sh.paseo`          |
+| `development` | Paseo Debug              | `sh.paseo.debug`    |
+| `personal`    | Paseo Personal (P badge) | `sh.paseo.personal` |
 
 EAS profiles: `development`, `production`, and `production-apk` in `packages/app/eas.json`.
+
+The personal variant coexists with official Paseo and has independent settings and host data.
+It uses the dedicated builder, not the official EAS project. Camera, microphone and pairing
+remain enabled. Push delivery needs a separate notification project and is not verified in
+the first personal package. Do not use the official Firebase files for this application ID.
+
+`npm run personal:android -- <revision> <output-directory>` runs the dedicated Docker builder
+from a clean committed source. Staging, dependencies and caches stay on local disk/volumes.
+Workspace mounts come from the actual npm workspace list; initialization applies repo patches.
+Set `PASEO_ANDROID_KEYSTORE` to a stable PKCS12 file and provide
+`PASEO_ANDROID_KEYSTORE_PASSWORD` through the environment. The signing-only container gets the
+key read-only; the build container receives no signing material. The committed public certificate
+fingerprint pins the identity. Verification checks the actual apksigner exit status, signer,
+package ID, version code and arm64-only libraries before publishing the APK.
+
+Keep a restricted local backup of the key and password. Actions Secrets cannot be downloaded
+as a backup. CI only exposes signing material to approved personal source commits; never to PRs.
 
 `development` uses Android `debug`.
 
@@ -23,7 +41,10 @@ The base version code comes from the package version:
 major * 1_000_000 + minor * 1_000 + patch
 ```
 
-Prerelease metadata is ignored, so `0.1.102-beta.1` and `0.1.102` both produce `1102`. The same value is used as the iOS `buildNumber` because `packages/app/eas.json` uses EAS's local app version source. Do not re-enable EAS remote version counters or Android `autoIncrement`; F-Droid and other source-based builders need the native build number to be visible in the repo.
+Prerelease metadata is ignored for Android, so `0.1.102-beta.1` and `0.1.102` both produce `1102`. iOS uses `base * 1000 + slot`, with beta slots 1–998 and stable slot 999. Keep EAS's local app version source; do not enable remote counters or Android `autoIncrement`.
+
+Personal Android builds use a separate application ID and `base * 1000 + revision` (1–999).
+Finish personal revisions before changing the upstream base; the next upstream patch sorts above all previous revisions. The helper rejects values beyond Android's 2,100,000,000 limit. Keep package manifests at the upstream version and record the personal suffix in build metadata. iOS numbering stays unchanged.
 
 The formula reserves three digits each for minor and patch. If either reaches `1000`, change the formula before cutting that release.
 
@@ -167,13 +188,11 @@ npm run android:builder:image
 npm run android:apk:arm64
 ```
 
-The APK is written to `.local-build/paseo-android-arm64-<version>.apk`.
-The build runs from a temporary `.local-build/android-arm64-build` workspace and
-uses named dependency and Gradle caches, so Expo prebuild output and host-side
-`node_modules` do not enter the checkout.
-
-The generated APK is debug-signed when release credentials are absent. Use it
-for temporary installation and testing, not Play Store upload.
+The compatibility command now invokes the personal builder described under App variants.
+You must supply the stable personal signing file and password; an unsigned/debug-key fallback
+is not allowed. The default output is `.local-build/paseo-personal-<version>-android-arm64.apk`.
+Legacy `--workdir` and `--skip-install` flags are removed. Use
+`npm run personal:android -- <revision> <output-directory>` for explicit version/output selection.
 
 ### F-Droid store metadata
 
