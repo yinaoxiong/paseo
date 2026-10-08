@@ -27,8 +27,115 @@ import {
   assertPackageFiles,
 } from "./personal/npm-distribution.mjs";
 import { windowsInstallerArgs } from "./personal/windows-install.mjs";
+import {
+  validateNpmApproval,
+  validatePublicationRequest,
+  assertRegistryVersion,
+  parseNpmPublishResult,
+} from "./personal/npm-publication.mjs";
 
 const repoRoot = new URL("../", import.meta.url);
+test("publisher admits only the fixed personal batch and explicit recoverable package selection", () => {
+  const accepted = JSON.parse(
+    readFileSync(new URL("./personal/npm-release-approved.json", import.meta.url)),
+  );
+  assert.equal(validateNpmApproval(accepted), accepted);
+  const wrongPackage = structuredClone(accepted);
+  wrongPackage.packages[0].name = "@getpaseo/protocol";
+  assert.throws(() => validateNpmApproval(wrongPackage), /Invalid package/);
+  assert.throws(
+    () => validateNpmApproval({ ...accepted, registry: "https://example.com/" }),
+    /Invalid accepted/,
+  );
+  const env = {
+    GITHUB_REPOSITORY: "yinaoxiong/paseo",
+    GITHUB_REF: "refs/heads/personal/stable",
+    GITHUB_EVENT_NAME: "workflow_dispatch",
+    GITHUB_WORKFLOW: "Personal npm Publish",
+    GITHUB_SHA: accepted.payloadSource,
+    GITHUB_RUN_ID: "123",
+    PASEO_NPM_PUBLISH_MARKER: "approved-batch-123",
+    PASEO_NPM_CONFIRMATION: "PUBLISH @yinaoxiong 0.11.0-personal.1",
+    PASEO_NPM_AUTH_MODE: "trusted",
+    PASEO_NPM_OPERATION_TOKENS: JSON.stringify(
+      Object.fromEntries(accepted.packages.map((p) => [p.key, "a".repeat(32)])),
+    ),
+    PASEO_NPM_CONFIRMED: "[]",
+  };
+  assert.equal(Object.keys(validatePublicationRequest(accepted, env).tokens).length, 5);
+  assert.throws(
+    () => validatePublicationRequest(accepted, { ...env, GITHUB_REF: "refs/heads/untrusted" }),
+    /Unapproved/,
+  );
+  assert.throws(
+    () => validatePublicationRequest(accepted, { ...env, GITHUB_EVENT_NAME: "pull_request" }),
+    /Unapproved/,
+  );
+  assert.throws(
+    () => validatePublicationRequest(accepted, { ...env, PASEO_NPM_OPERATION_TOKENS: "{}" }),
+    /Missing one-shot/,
+  );
+  assert.throws(
+    () => validatePublicationRequest(accepted, { ...env, PASEO_NPM_CONFIRMED: '["protocol"]' }),
+    /Invalid partial/,
+  );
+  const tokens = JSON.parse(env.PASEO_NPM_OPERATION_TOKENS);
+  delete tokens.protocol;
+  assert.deepEqual(
+    validatePublicationRequest(accepted, {
+      ...env,
+      PASEO_NPM_CONFIRMED: '["protocol"]',
+      PASEO_NPM_OPERATION_TOKENS: JSON.stringify(tokens),
+    }).confirmed,
+    ["protocol"],
+  );
+  const p = accepted.packages[0];
+  const response = {
+    id: `${p.name}@${p.version}`,
+    name: p.name,
+    version: p.version,
+    integrity: p.integrity,
+  };
+  assert.deepEqual(parseNpmPublishResult(JSON.stringify({ [p.name]: response }), p), response);
+  assert.throws(() => parseNpmPublishResult(JSON.stringify(response), p), /Unexpected npm/);
+  assert.throws(
+    () =>
+      parseNpmPublishResult(JSON.stringify({ [p.name]: { ...response, integrity: "wrong" } }), p),
+    /Unexpected npm/,
+  );
+  assertRegistryVersion({ name: p.name, version: p.version, dist: { integrity: p.integrity } }, p);
+  assert.throws(
+    () =>
+      assertRegistryVersion({ name: p.name, version: p.version, dist: { integrity: "wrong" } }, p),
+    /Registry conflict/,
+  );
+});
+test("npm publisher keeps publication manual, file-pinned and receipts between package submissions", () => {
+  const workflow = loadYaml(
+    readFileSync(new URL("../.github/workflows/personal-npm-publish.yml", import.meta.url), "utf8"),
+  );
+  assert.deepEqual(Object.keys(workflow.on), ["workflow_dispatch"]);
+  const job = workflow.jobs.publish;
+  assert.equal(job.permissions["contents"], "read");
+  assert.equal(job.permissions["actions"], "read");
+  assert.equal(job.permissions["id-token"], "write");
+  const publish = job.steps.filter((s) => s.id?.startsWith("publish_"));
+  assert.deepEqual(
+    publish.map((s) => s.id),
+    ["publish_protocol", "publish_client", "publish_plugin", "publish_server", "publish_cli"],
+  );
+  for (const step of publish) {
+    const next = job.steps[job.steps.indexOf(step) + 1];
+    assert.match(next.uses, /^actions\/upload-artifact@/);
+    assert.match(next.if, /always\(\)/);
+  }
+  assert.equal(
+    job.steps.some((s) => s.run?.includes("npm ci") || s.run?.includes("build:")),
+    false,
+  );
+  for (const step of job.steps.filter((s) => s.uses?.startsWith("actions/download-artifact")))
+    assert.equal(step.with["run-id"], "37776588373");
+});
 test("normal postinstall applies the upstream bounded NSIS per-user path copy", () => {
   const require = createRequire(import.meta.url);
   const template = readFileSync(

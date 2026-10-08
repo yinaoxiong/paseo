@@ -163,12 +163,10 @@ packages use native Node 24 runners, and Android uses
 the dedicated builder. Node 24.21.0/npm 11.19.0, action SHAs and the Linux DevContainer
 image digest are pinned. Android base images use version tags; manifests record the
 actual builder image ID, so future rebuilds are not claimed to be byte-reproducible.
-Standalone CLI tarballs are platform-specific and fully bundled: Linux x64, macOS
-arm64 and Windows x64. Install the matching archive with Node 24; no desktop App
-or native build toolchain is required. Production dependencies are prepared from
-the lockfile on each target with Node, separately from Electron ABI rebuilds.
-Each final tgz must pass empty-cache offline npm installation through its generated
-entry, an isolated daemon and Terminal execution, including paths with spaces.
+The five npm archives are platform-neutral. Target OS dependencies resolve online;
+CLI validation runs on Linux x64, Mac arm64 and Windows x64 with an empty cache,
+real npm entry, isolated daemon and Terminal execution, including paths with spaces.
+Keep native Node installation separate from Electron dependency preparation.
 
 Caches contain downloads or Android toolchain data,
 never shared `node_modules` or signing material. A small added-line credential check
@@ -179,6 +177,21 @@ Download and verify manifests/checksums before release; public Release publicati
 uses the accepted files and requires explicit approval for that version/file set.
 Keep inherited deployment/release workflows disabled and the fork default branch
 on `personal/stable`. Do not invoke the official npm/store/deployment release flow.
+
+`Personal npm Publish` is manual and accepts only the committed, hash-pinned batch
+from a successful personal build. Publisher source and payload source are recorded
+separately; the publisher never rebuilds or repacks. Each of the five package versions
+has a separate parent submission intent and a durable result before the next package.
+After an uncertain result, reconcile the exact registry integrity before resuming;
+never rerun the entire publisher blindly or overwrite an immutable npm version.
+
+New packages must exist before npm lets you configure Trusted Publishing. The first
+approved publication uses a short-lived granular `PASEO_NPM_BOOTSTRAP_TOKEN` Secret,
+restricted to `@yinaoxiong` with publish access and CI 2FA bypass. Do not put the token
+in source, artifacts or chat. After bootstrap, configure GitHub Trusted Publisher for
+`yinaoxiong/paseo`, `personal-npm-publish.yml`, with direct publish permission, then
+revoke the bootstrap token. Publication of the concrete batch still requires user
+approval; a candidate tarball alone cannot resolve the other four unpublished packages.
 
 ## Running the dev server
 
