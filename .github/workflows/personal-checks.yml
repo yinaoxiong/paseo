@@ -1,0 +1,42 @@
+name: Personal Checks
+on:
+  push:
+    branches: ["personal/**", "integration/personal-*"]
+  pull_request:
+    branches: ["personal/stable"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: personal-checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  quality:
+    if: github.repository == 'yinaoxiong/paseo'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24.21.0"
+      - name: Prepare CLI and local cache
+        run: |
+          npm install -g npm@11.19.0 @devcontainers/cli@0.87.0 --ignore-scripts --no-audit --no-fund
+          node scripts/personal/prepare-ci-container.mjs
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/paseo-npm-cache
+          key: personal-npm-linux-x64-node24.21.0-npm11.19.0-${{ hashFiles('package-lock.json') }}
+      - name: Check only newly added content
+        env:
+          PASEO_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: node scripts/personal/check-diff.mjs
+      - name: Create validation container
+        run: devcontainer up --workspace-folder "$GITHUB_WORKSPACE" --override-config "$RUNNER_TEMP/paseo-personal-ci-devcontainer.json" --mount-git-worktree-common-dir true
+      - name: Build and validate
+        run: |
+          devcontainer exec --workspace-folder "$GITHUB_WORKSPACE" --override-config "$RUNNER_TEMP/paseo-personal-ci-devcontainer.json" --mount-git-worktree-common-dir true sh -lc 'set -e; npm run build:server; npm run format:check; npm run lint; npm run typecheck; node --test scripts/ci-workflow.test.mjs scripts/release-version-utils.test.mjs; npx vitest run packages/app/native-release-version.test.ts packages/desktop/src/features/auto-updater.test.ts --bail=1'
