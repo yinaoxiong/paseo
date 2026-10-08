@@ -47,6 +47,18 @@ test("npm fork keeps canonical imports, moves internal peers to explicit aliases
     "0.11.0",
   );
   assert.equal(result.name, "@yinaoxiong/paseo-plugin");
+  for (const key of ["protocol", "client", "plugin", "server", "cli"]) {
+    const staged = npmManifest(
+      { name: `@getpaseo/${key}`, version: "0.11.0" },
+      "0.11.0-personal.1",
+      "0.11.0",
+    );
+    assert.deepEqual(staged.repository, {
+      type: "git",
+      url: "git+https://github.com/yinaoxiong/paseo.git",
+      directory: `packages/${key}`,
+    });
+  }
   assert.equal(
     result.dependencies["@getpaseo/client"],
     "npm:@yinaoxiong/paseo-client@0.11.0-personal.1",

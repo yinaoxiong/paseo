@@ -106,6 +106,8 @@ protocol, client and plugin to `@yinaoxiong/paseo-*`; canonical SDK imports rema
 supported through dependency aliases. Private internal peers are explicit dependencies
 in the published plugin, because an alias is not a peer version range. Official
 relay and highlight are pinned to the unchanged upstream version.
+Staged manifests identify the public fork and workspace directory, as required by
+npm's provenance checks. Source workspace identities remain upstream-compatible.
 
 The same JavaScript archives serve Linux x64, Mac arm64 and Windows x64 with Node 24.
 Third-party dependencies install normally on the target OS. Only the existing patched
@@ -145,8 +147,9 @@ Only verified files and their manifests go to the output directory.
 ### Personal fork CI
 
 The public fork runs `Personal Checks` on personal branches/PRs and `Personal Build`
-only on manual dispatch. `cli-only` validates three standalone CLI archives without
-desktop/APK builds or signing credentials; `all` builds the six final installers.
+only on manual dispatch. `online-verify` builds five universal npm candidates once
+and validates the same files on three systems without desktop/APK signing steps;
+`all` also builds the Mac and Windows Apps and Android APK.
 The existing Mac archive verification mode still reuses the accepted archive. Builds accept a full source SHA and personal revision;
 the resolver admits only commits in the validated personal lineage and current
 `personal/stable`. Signing credentials are not exposed to PR checks.
