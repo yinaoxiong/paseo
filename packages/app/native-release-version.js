@@ -56,8 +56,25 @@ function getFdroidVersionCodes(version) {
   }));
 }
 
+function getPersonalNativeReleaseVersion(version, revision) {
+  if (!/^\d+\.\d+\.\d+$/.test(version)) {
+    throw new Error("Personal builds require an upstream stable version");
+  }
+  if (!Number.isSafeInteger(revision) || revision < 1 || revision > 999) {
+    throw new Error("Personal revision must be between 1 and 999");
+  }
+  const native = getNativeReleaseVersion(version);
+  // Separate personal package ID: 999 revisions fit below the next upstream patch.
+  const androidVersionCode = native.androidVersionCode * 1000 + revision;
+  if (androidVersionCode > 2100000000) {
+    throw new Error("Personal Android versionCode is out of range");
+  }
+  return { ...native, androidVersionCode };
+}
+
 module.exports = {
   FDROID_ABI_VERSION_CODE_SUFFIXES,
   getFdroidVersionCodes,
   getNativeReleaseVersion,
+  getPersonalNativeReleaseVersion,
 };

@@ -35,6 +35,11 @@
     "packages/cli"
   ],
   "scripts": {
+    "personal:info": "node scripts/personal/build-info.mjs",
+    "personal:cli": "node scripts/personal/build-cli.mjs",
+    "personal:validate:npm": "node scripts/personal/validate-npm.mjs",
+    "personal:desktop": "node scripts/personal/build-desktop.mjs",
+    "personal:android": "node scripts/personal/build-android.mjs",
     "dev": "npm run dev:server",
     "dev:win": "powershell ./scripts/dev.ps1",
     "dev:server": "cross-env PASEO_LISTEN=127.0.0.1:6768 ./scripts/dev-daemon.sh",
