@@ -8,6 +8,10 @@ const { chromium } = require("playwright");
 const { extractFile } = require("@electron/asar");
 const { WebSocket } = require("ws");
 const assert = require("node:assert/strict");
+const {
+  getTerminalHookSmokeCommand,
+  hasTerminalCompletionLine,
+} = require("./terminal-smoke-proof.cjs");
 
 const EXECUTABLE_NAME = "Paseo";
 const SMOKE_TIMEOUT_MS = 60_000;
@@ -117,20 +121,6 @@ function shellQuoteCliArg(value) {
   }
 
   return shellQuote(String(value));
-}
-
-function getTerminalHookSmokeCommand(marker) {
-  if (process.platform === "win32") {
-    const script = [
-      "& $env:PASEO_HOOK_CLI hooks codex Stop",
-      "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
-      `Write-Output '${marker}'`,
-    ].join("; ");
-    const encodedScript = Buffer.from(script, "utf16le").toString("base64");
-    return `powershell.exe -NoProfile -NonInteractive -EncodedCommand ${encodedScript}`;
-  }
-
-  return `"$PASEO_HOOK_CLI" hooks codex Stop && echo ${marker}`;
 }
 
 function getShellCommand(script) {
@@ -734,10 +724,16 @@ async function smokeCliTerminal({ appPath, env }) {
       throw new Error(`Terminal ${terminalId} was not listed after create`);
     }
 
+    const command = getTerminalHookSmokeCommand(marker);
+    assert.equal(
+      command.includes(marker),
+      false,
+      "Command echo must not contain completion marker",
+    );
     await runCliShimJsonCommand({
       appPath,
       env,
-      args: ["terminal", "send-keys", terminalId, getTerminalHookSmokeCommand(marker), "Enter"],
+      args: ["terminal", "send-keys", terminalId, command, "Enter"],
       label: "Bundled CLI shim terminal hook command",
     });
 
@@ -749,9 +745,15 @@ async function smokeCliTerminal({ appPath, env }) {
         label: "Bundled CLI shim terminal capture",
       });
       const lines = Array.isArray(capture?.lines) ? capture.lines : [];
-      if (lines.join("\n").includes(marker)) {
-        console.log("Packaged desktop smoke: terminal hook command completed");
-        return;
+      if (hasTerminalCompletionLine(lines, marker)) {
+        const proof = {
+          marker,
+          outputLine: marker,
+          exactMarkerLine: true,
+          commandEchoContainsMarker: false,
+        };
+        console.log(`Packaged desktop terminal execution receipt: ${JSON.stringify(proof)}`);
+        return proof;
       }
 
       if (attempt < TERMINAL_CAPTURE_ATTEMPTS) {
@@ -943,7 +945,7 @@ async function smokePackagedDesktopApp({
     await assertBuiltinPluginsStarted(listen);
     console.log("Packaged desktop smoke: every built-in plugin started");
     await smokeCliShim({ appPath, env });
-    await smokeCliTerminal({ appPath, env });
+    const terminalProof = await smokeCliTerminal({ appPath, env });
     if (expectedSandbox !== undefined) {
       await assertSandboxState({ browser, page, expectedSandbox, stdout, stderr });
       await openSmokeWorkspace({ appPath, env, page, daemonHome });
@@ -953,6 +955,7 @@ async function smokePackagedDesktopApp({
     console.log(
       `Packaged desktop smoke passed: real renderer and preload loaded; renderer-started desktop daemon pid ${status.pid}, listen ${status.listen}; CLI shim daemon status and terminal smoke succeeded`,
     );
+    return { rendererBridgeDaemonTerminal: "passed", terminalProof };
   } catch (error) {
     await writeSmokeArtifacts({ page, stdout, stderr, userData, daemonHome, error }).catch(
       (artifactError) => {
