@@ -29,7 +29,9 @@ export function validateNpmApproval(value) {
     !/^[a-f0-9]{40}$/.test(value.payloadSource) ||
     !/^[a-f0-9]{64}$/.test(value.lockSha256) ||
     !/^[a-f0-9]{64}$/.test(value.manifestSha256) ||
-    value.version !== "0.11.0-personal.1" ||
+    !/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-personal\.[1-9][0-9]{0,2}$/.test(
+      value.version ?? "",
+    ) ||
     value.registry !== "https://registry.npmjs.org/" ||
     value.distTag !== "latest" ||
     value.packages?.length !== 5 ||
@@ -41,6 +43,20 @@ export function validateNpmApproval(value) {
   for (const [index, target] of ["linux-x64", "macos-arm64", "windows-x64"].entries())
     validateAcceptedProof(value.proofs[index], target);
   return value;
+}
+
+export function npmPublicationInputs(value, upstreamVersion) {
+  const approved = validateNpmApproval(value);
+  if (
+    !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(upstreamVersion ?? "") ||
+    !approved.version.startsWith(`${upstreamVersion}-personal.`)
+  )
+    throw new Error("Accepted npm batch does not match the publisher's upstream version");
+  return {
+    version: approved.version,
+    buildRunId: approved.buildRunId,
+    confirmation: `PUBLISH @yinaoxiong ${approved.version}`,
+  };
 }
 
 function validateAcceptedPackage(p, key, version) {

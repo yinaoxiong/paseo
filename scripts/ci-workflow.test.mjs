@@ -32,9 +32,66 @@ import {
   validateNpmApproval,
   assertRegistryVersion,
   parseNpmPublishResult,
+  npmPublicationInputs,
 } from "./personal/npm-publication.mjs";
+import {
+  trustedPersonalBase,
+  assertTrustedPersonalSource,
+  resolvePersonalDiffBase,
+} from "./personal/trusted-source.mjs";
 
 const repoRoot = new URL("../", import.meta.url);
+test("replayed CI admits the reviewed overlay and handles absent or unrelated push bases", () => {
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const official = execFileSync("git", ["rev-parse", "v0.11.2^{commit}"], {
+    encoding: "utf8",
+  }).trim();
+  assert.doesNotThrow(() => assertTrustedPersonalSource(head));
+  assert.throws(() => assertTrustedPersonalSource(official));
+  assert.throws(() => assertTrustedPersonalSource("3916a1e615bb8f084e418bc7f205ea8d4fc40255"));
+  assert.throws(() => assertTrustedPersonalSource("personal/stable"), /Invalid personal/);
+  assert.equal(resolvePersonalDiffBase(undefined), trustedPersonalBase);
+  assert.equal(resolvePersonalDiffBase("0".repeat(40)), trustedPersonalBase);
+  assert.equal(resolvePersonalDiffBase("f".repeat(40)), trustedPersonalBase);
+  assert.equal(
+    resolvePersonalDiffBase("3916a1e615bb8f084e418bc7f205ea8d4fc40255"),
+    trustedPersonalBase,
+  );
+  assert.equal(resolvePersonalDiffBase(official), official);
+  const result = spawnSync(process.execPath, ["scripts/personal/check-diff.mjs"], {
+    encoding: "utf8",
+    env: { ...process.env, PASEO_DIFF_BASE: "f".repeat(40) },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, new RegExp(trustedPersonalBase));
+});
+test("npm batch inputs reject old upstream approvals and inconsistent or unsafe versions", () => {
+  const accepted = JSON.parse(
+    readFileSync(new URL("./personal/npm-release-approved.json", import.meta.url)),
+  );
+  const base = accepted.version.split("-personal.")[0];
+  assert.deepEqual(npmPublicationInputs(accepted, base), {
+    version: accepted.version,
+    buildRunId: accepted.buildRunId,
+    confirmation: `PUBLISH @yinaoxiong ${accepted.version}`,
+  });
+  assert.throws(() => npmPublicationInputs(accepted, "99.0.0"), /upstream version/);
+  assert.throws(
+    () => validateNpmApproval({ ...accepted, version: "0.11.2-personal.1000" }),
+    /Invalid accepted/,
+  );
+  assert.throws(
+    () => validateNpmApproval({ ...accepted, version: "0.11.2-personal.0" }),
+    /Invalid accepted/,
+  );
+  assert.throws(
+    () => validateNpmApproval({ ...accepted, version: "0.11.2-personal.1\nother" }),
+    /Invalid accepted/,
+  );
+  const wrong = structuredClone(accepted);
+  wrong.packages[0].version = "0.11.2-personal.999";
+  assert.throws(() => validateNpmApproval(wrong), /Invalid package/);
+});
 test("publisher admits only the fixed personal batch and validates standard npm responses", () => {
   const accepted = JSON.parse(
     readFileSync(new URL("./personal/npm-release-approved.json", import.meta.url)),
@@ -93,7 +150,9 @@ test("npm publisher keeps publication manual, file-pinned and receipts between p
   );
   for (const step of publish) {
     assert.match(step.run, /npm publish/);
+    assert.match(step.run, /\$\{PASEO_NPM_VERSION\}/);
     assert.doesNotMatch(step.run, /publish-npm\.mjs/);
+    assert.equal(step.env.PASEO_NPM_VERSION, "${{ steps.batch.outputs.version }}");
     assert.equal(
       step.env.NODE_AUTH_TOKEN,
       "${{ inputs.auth_mode == 'bootstrap' && secrets.PASEO_NPM_BOOTSTRAP_TOKEN || '' }}",
@@ -106,8 +165,12 @@ test("npm publisher keeps publication manual, file-pinned and receipts between p
     job.steps.some((s) => s.run?.includes("npm ci") || s.run?.includes("build:")),
     false,
   );
-  for (const step of job.steps.filter((s) => s.uses?.startsWith("actions/download-artifact")))
-    assert.equal(step.with["run-id"], "37776588373");
+  const batch = job.steps.find((s) => s.id === "batch");
+  assert.equal(batch.run, "node scripts/personal/verify-npm-release.mjs --inputs");
+  for (const step of job.steps.filter((s) => s.uses?.startsWith("actions/download-artifact"))) {
+    assert.equal(step.with["run-id"], "${{ steps.batch.outputs.build_run_id }}");
+    assert.ok(job.steps.indexOf(batch) < job.steps.indexOf(step));
+  }
 });
 test("normal postinstall applies the upstream bounded NSIS per-user path copy", () => {
   const require = createRequire(import.meta.url);

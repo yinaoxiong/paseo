@@ -1,11 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { repoRoot } from "./build-info.mjs";
+import { resolvePersonalDiffBase } from "./trusted-source.mjs";
 
-const supplied = process.env.PASEO_DIFF_BASE;
-const base =
-  supplied && /^[0-9a-f]{40}$/.test(supplied) && !/^0+$/.test(supplied)
-    ? supplied
-    : "de796a7e2e7bc941fcf194346a043e2717bd8c5a";
+const base = resolvePersonalDiffBase(process.env.PASEO_DIFF_BASE);
 const diff = execFileSync("git", ["diff", "--unified=0", base, "HEAD"], {
   cwd: repoRoot,
   encoding: "utf8",

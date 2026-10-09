@@ -10,7 +10,7 @@ on:
       confirmation:
         type: string
         required: true
-        description: "PUBLISH @yinaoxiong 0.11.0-personal.1"
+        description: "PUBLISH @yinaoxiong <version from the accepted batch>"
       auth_mode:
         type: choice
         options: [bootstrap, trusted]
@@ -49,29 +49,32 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ""
         run: npm install -g npm@11.19.0 --ignore-scripts --no-audit --no-fund
+      - name: Resolve the committed accepted batch
+        id: batch
+        run: node scripts/personal/verify-npm-release.mjs --inputs
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: personal-npm-candidates
           path: .local-build/npm-publish-input
-          run-id: "37776588373"
+          run-id: ${{ steps.batch.outputs.build_run_id }}
           github-token: ${{ github.token }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: personal-npm-proof-linux-x64
           path: .local-build/npm-publish-input
-          run-id: "37776588373"
+          run-id: ${{ steps.batch.outputs.build_run_id }}
           github-token: ${{ github.token }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: personal-npm-proof-macos-arm64
           path: .local-build/npm-publish-input
-          run-id: "37776588373"
+          run-id: ${{ steps.batch.outputs.build_run_id }}
           github-token: ${{ github.token }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: personal-npm-proof-windows-x64
           path: .local-build/npm-publish-input
-          run-id: "37776588373"
+          run-id: ${{ steps.batch.outputs.build_run_id }}
           github-token: ${{ github.token }}
       - name: Verify accepted build and files
         env:
@@ -83,8 +86,9 @@ jobs:
         id: publish_protocol
         if: contains(fromJSON(inputs.packages), 'protocol')
         env:
+          PASEO_NPM_VERSION: ${{ steps.batch.outputs.version }}
           NODE_AUTH_TOKEN: ${{ inputs.auth_mode == 'bootstrap' && secrets.PASEO_NPM_BOOTSTRAP_TOKEN || '' }}
-        run: npm publish "./.local-build/npm-publish-input/yinaoxiong-paseo-protocol-0.11.0-personal.1.tgz" --ignore-scripts --access public --tag latest --provenance --json > "$RUNNER_TEMP/paseo-npm-results/protocol.json"
+        run: npm publish "./.local-build/npm-publish-input/yinaoxiong-paseo-protocol-${PASEO_NPM_VERSION}.tgz" --ignore-scripts --access public --tag latest --provenance --json > "$RUNNER_TEMP/paseo-npm-results/protocol.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always() && steps.publish_protocol.outcome != 'skipped'
         with:
@@ -96,8 +100,9 @@ jobs:
         id: publish_client
         if: contains(fromJSON(inputs.packages), 'client')
         env:
+          PASEO_NPM_VERSION: ${{ steps.batch.outputs.version }}
           NODE_AUTH_TOKEN: ${{ inputs.auth_mode == 'bootstrap' && secrets.PASEO_NPM_BOOTSTRAP_TOKEN || '' }}
-        run: npm publish "./.local-build/npm-publish-input/yinaoxiong-paseo-client-0.11.0-personal.1.tgz" --ignore-scripts --access public --tag latest --provenance --json > "$RUNNER_TEMP/paseo-npm-results/client.json"
+        run: npm publish "./.local-build/npm-publish-input/yinaoxiong-paseo-client-${PASEO_NPM_VERSION}.tgz" --ignore-scripts --access public --tag latest --provenance --json > "$RUNNER_TEMP/paseo-npm-results/client.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always() && steps.publish_client.outcome != 'skipped'
         with:
@@ -109,8 +114,9 @@ jobs:
         id: publish_plugin
         if: contains(fromJSON(inputs.packages), 'plugin')
         env:
+          PASEO_NPM_VERSION: ${{ steps.batch.outputs.version }}
           NODE_AUTH_TOKEN: ${{ inputs.auth_mode == 'bootstrap' && secrets.PASEO_NPM_BOOTSTRAP_TOKEN || '' }}
-        run: npm publish "./.local-build/npm-publish-input/yinaoxiong-paseo-plugin-0.11.0-personal.1.tgz" --ignore-scripts --access public --tag latest --provenance --json > "$RUNNER_TEMP/paseo-npm-results/plugin.json"
+        run: npm publish "./.local-build/npm-publish-input/yinaoxiong-paseo-plugin-${PASEO_NPM_VERSION}.tgz" --ignore-scripts --access public --tag latest --provenance --json > "$RUNNER_TEMP/paseo-npm-results/plugin.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always() && steps.publish_plugin.outcome != 'skipped'
         with:
@@ -122,8 +128,9 @@ jobs:
         id: publish_server
         if: contains(fromJSON(inputs.packages), 'server')
         env:
+          PASEO_NPM_VERSION: ${{ steps.batch.outputs.version }}
           NODE_AUTH_TOKEN: ${{ inputs.auth_mode == 'bootstrap' && secrets.PASEO_NPM_BOOTSTRAP_TOKEN || '' }}
-        run: npm publish "./.local-build/npm-publish-input/yinaoxiong-paseo-server-0.11.0-personal.1.tgz" --ignore-scripts --access public --tag latest --provenance --json > "$RUNNER_TEMP/paseo-npm-results/server.json"
+        run: npm publish "./.local-build/npm-publish-input/yinaoxiong-paseo-server-${PASEO_NPM_VERSION}.tgz" --ignore-scripts --access public --tag latest --provenance --json > "$RUNNER_TEMP/paseo-npm-results/server.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always() && steps.publish_server.outcome != 'skipped'
         with:
@@ -135,8 +142,9 @@ jobs:
         id: publish_cli
         if: contains(fromJSON(inputs.packages), 'cli')
         env:
+          PASEO_NPM_VERSION: ${{ steps.batch.outputs.version }}
           NODE_AUTH_TOKEN: ${{ inputs.auth_mode == 'bootstrap' && secrets.PASEO_NPM_BOOTSTRAP_TOKEN || '' }}
-        run: npm publish "./.local-build/npm-publish-input/yinaoxiong-paseo-cli-0.11.0-personal.1.tgz" --ignore-scripts --access public --tag latest --provenance --json > "$RUNNER_TEMP/paseo-npm-results/cli.json"
+        run: npm publish "./.local-build/npm-publish-input/yinaoxiong-paseo-cli-${PASEO_NPM_VERSION}.tgz" --ignore-scripts --access public --tag latest --provenance --json > "$RUNNER_TEMP/paseo-npm-results/cli.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always() && steps.publish_cli.outcome != 'skipped'
         with:

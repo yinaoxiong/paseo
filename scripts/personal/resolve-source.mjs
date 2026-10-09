@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { repoRoot, personalVersion } from "./build-info.mjs";
+import { assertTrustedPersonalSource } from "./trusted-source.mjs";
 
 const sha = process.env.PASEO_SOURCE_SHA || process.env.GITHUB_SHA;
 const revision = Number(process.env.PASEO_PERSONAL_REVISION);
@@ -14,7 +15,7 @@ if (
 const git = (...args) => execFileSync("git", args, { cwd: repoRoot, encoding: "utf8" }).trim();
 git("fetch", "--no-tags", "origin", "personal/stable:refs/remotes/origin/personal/stable");
 git("merge-base", "--is-ancestor", sha, "refs/remotes/origin/personal/stable");
-git("merge-base", "--is-ancestor", "de796a7e2e7bc941fcf194346a043e2717bd8c5a", sha);
+assertTrustedPersonalSource(sha);
 const sourcePackage = JSON.parse(git("show", `${sha}:package.json`));
 personalVersion(sourcePackage.version, revision);
 appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\nrevision=${revision}\nmarker=${marker}\n`);

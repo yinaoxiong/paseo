@@ -157,8 +157,10 @@ and validates the same files on three systems without desktop/APK signing steps;
 `android-only` builds just the signed personal APK, skipping npm candidate/installation and
 desktop jobs. Use a new personal revision for an APK update; it retains the package ID and signer.
 The existing Mac archive verification mode still reuses the accepted archive. Builds accept a full source SHA and personal revision;
-the resolver admits only commits in the validated personal lineage and current
-`personal/stable`. Signing credentials are not exposed to PR checks.
+the resolver admits only commits in the reviewed personal baseline lineage and current
+`personal/stable`. Replaying the overlay onto a new upstream tag changes commit IDs;
+update the baseline pin after reviewing that replay. On the first rewritten push,
+Checks uses that pin when the previous push SHA is absent or no longer an ancestor. Signing credentials are not exposed to PR checks.
 
 Linux checks/CLI use DevContainer; standalone Mac arm64/Windows x64 CLI and desktop
 packages use native Node 24 runners, and Android uses
@@ -181,7 +183,11 @@ Keep inherited deployment/release workflows disabled and the fork default branch
 on `personal/stable`. Do not invoke the official npm/store/deployment release flow.
 
 `Personal npm Publish` is manual and accepts only the committed, hash-pinned batch
-from a successful personal build. Publisher source and payload source are recorded
+from a successful personal build. The committed approval selects the version and
+original Run; workflow download paths and publish filenames derive from that record.
+The batch must match the publisher checkout's upstream version. An old approval
+therefore fails closed after a baseline upgrade until the new batch is accepted.
+Publisher source and payload source are recorded
 separately; the publisher never rebuilds or repacks. Authentication uses official `actions/setup-node`; each package is published with
 standard `npm publish`. A small read-only preflight checks accepted files and source.
 Raw npm JSON is retained before the next package. Boss submission intents and registry

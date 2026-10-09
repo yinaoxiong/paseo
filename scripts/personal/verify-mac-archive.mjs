@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { createBuildInfo, repoRoot } from "./build-info.mjs";
+import { assertTrustedPersonalSource } from "./trusted-source.mjs";
 
 if (
   process.platform !== "darwin" ||
@@ -34,7 +35,7 @@ assert.match(manifest.sourceSha, /^[0-9a-f]{40}$/);
 assert.equal(asset.name, `Paseo-${info.version}-macos-arm64.tar.gz`);
 assert.equal(asset.sha256, expectedHash);
 const git = (...args) => execFileSync("git", args, { cwd: repoRoot, encoding: "utf8" }).trim();
-git("merge-base", "--is-ancestor", "de796a7e2e7bc941fcf194346a043e2717bd8c5a", manifest.sourceSha);
+assertTrustedPersonalSource(manifest.sourceSha);
 git("merge-base", "--is-ancestor", manifest.sourceSha, info.sourceSha);
 const run = JSON.parse(
   execFileSync("gh", ["api", `repos/yinaoxiong/paseo/actions/runs/${originalRun}`], {

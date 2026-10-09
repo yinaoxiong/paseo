@@ -1,17 +1,34 @@
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { validateNpmApproval, verifyNpmFiles, assertRegistryVersion } from "./npm-publication.mjs";
+import { appendFileSync } from "node:fs";
+import {
+  validateNpmApproval,
+  verifyNpmFiles,
+  assertRegistryVersion,
+  npmPublicationInputs,
+} from "./npm-publication.mjs";
+import { assertTrustedPersonalSource } from "./trusted-source.mjs";
 
 const approved = validateNpmApproval(
   JSON.parse(await readFile(new URL("./npm-release-approved.json", import.meta.url))),
 );
+const source = JSON.parse(await readFile(new URL("../../package.json", import.meta.url)));
+const inputs = npmPublicationInputs(approved, source.version);
 if (
   process.env.GITHUB_REPOSITORY !== approved.repository ||
   process.env.GITHUB_REF !== "refs/heads/personal/stable" ||
   process.env.GITHUB_EVENT_NAME !== "workflow_dispatch" ||
-  process.env.PASEO_NPM_CONFIRMATION !== "PUBLISH @yinaoxiong 0.11.0-personal.1"
+  process.env.PASEO_NPM_CONFIRMATION !== inputs.confirmation
 )
   throw new Error("Unapproved publication context");
+if (process.argv[2] === "--inputs") {
+  if (!process.env.GITHUB_OUTPUT) throw new Error("Missing workflow output file");
+  appendFileSync(
+    process.env.GITHUB_OUTPUT,
+    `version=${inputs.version}\nbuild_run_id=${inputs.buildRunId}\n`,
+  );
+  process.exit(0);
+}
 const selected = JSON.parse(process.env.PASEO_NPM_PACKAGES);
 const keys = new Set(approved.packages.map((p) => p.key));
 if (
@@ -38,12 +55,7 @@ if (
 )
   throw new Error("Original build identity or success mismatch");
 const git = (...args) => execFileSync("git", args, { stdio: "pipe" });
-git(
-  "merge-base",
-  "--is-ancestor",
-  "de796a7e2e7bc941fcf194346a043e2717bd8c5a",
-  approved.payloadSource,
-);
+assertTrustedPersonalSource(approved.payloadSource);
 git("merge-base", "--is-ancestor", approved.payloadSource, process.env.GITHUB_SHA);
 for (const p of approved.packages) {
   const response = await fetch(`${approved.registry}${encodeURIComponent(p.name)}/${p.version}`, {

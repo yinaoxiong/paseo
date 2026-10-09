@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { repoRoot } from "./build-info.mjs";
+import { assertTrustedPersonalSource } from "./trusted-source.mjs";
 
 const id = process.env.PASEO_NPM_CANDIDATE_RUN_ID;
 const hash = process.env.PASEO_NPM_CANDIDATE_MANIFEST_SHA256;
@@ -30,7 +31,7 @@ if (
   throw new Error("Candidate build job has not succeeded");
 const git = (...args) => execFileSync("git", args, { cwd: repoRoot, encoding: "utf8" }).trim();
 git("fetch", "--no-tags", "origin", run.head_sha);
-git("merge-base", "--is-ancestor", "de796a7e2e7bc941fcf194346a043e2717bd8c5a", run.head_sha);
+assertTrustedPersonalSource(run.head_sha);
 git(
   "merge-base",
   "--is-ancestor",
