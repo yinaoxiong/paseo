@@ -14,7 +14,7 @@ on:
       auth_mode:
         type: choice
         options: [bootstrap, trusted]
-        default: bootstrap
+        default: trusted
       packages:
         type: string
         default: '["protocol","client","plugin","server","cli"]'

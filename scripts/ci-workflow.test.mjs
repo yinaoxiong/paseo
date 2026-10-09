@@ -72,6 +72,11 @@ test("npm publisher keeps publication manual, file-pinned and receipts between p
     readFileSync(new URL("../.github/workflows/personal-npm-publish.yml", import.meta.url), "utf8"),
   );
   assert.deepEqual(Object.keys(workflow.on), ["workflow_dispatch"]);
+  assert.equal(workflow.on.workflow_dispatch.inputs.auth_mode.default, "trusted");
+  assert.deepEqual(workflow.on.workflow_dispatch.inputs.auth_mode.options, [
+    "bootstrap",
+    "trusted",
+  ]);
   const job = workflow.jobs.publish;
   assert.doesNotMatch(JSON.stringify(job.env), /\$\{\{\s*runner\./);
   const setup = job.steps.find((step) => step.uses?.startsWith("actions/setup-node@"));
@@ -88,6 +93,10 @@ test("npm publisher keeps publication manual, file-pinned and receipts between p
   for (const step of publish) {
     assert.match(step.run, /npm publish/);
     assert.doesNotMatch(step.run, /publish-npm\.mjs/);
+    assert.equal(
+      step.env.NODE_AUTH_TOKEN,
+      "${{ inputs.auth_mode == 'bootstrap' && secrets.PASEO_NPM_BOOTSTRAP_TOKEN || '' }}",
+    );
     const next = job.steps[job.steps.indexOf(step) + 1];
     assert.match(next.uses, /^actions\/upload-artifact@/);
     assert.match(next.if, /always\(\)/);
