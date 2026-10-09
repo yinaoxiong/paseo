@@ -38,6 +38,17 @@ function createModel(
 }
 
 describe("resolveCompactExplorerSidebarHostModel", () => {
+  it("keeps Changes available for a known Git workspace before status is readable", () => {
+    const result = resolveCompactExplorerSidebarHostModel({
+      previous: null,
+      selection: { serverId: "server-1", workspaceId: "workspace-a" },
+      workspace: createWorkspace({ id: "workspace-a" }),
+      checkoutStatus: undefined,
+    });
+
+    expect(result?.isGit).toBe(true);
+  });
+
   it("retains the last workspace root for the same active selection while the workspace reloads", () => {
     const previous = createModel();
 
@@ -45,7 +56,7 @@ describe("resolveCompactExplorerSidebarHostModel", () => {
       previous,
       selection: { serverId: "server-1", workspaceId: "workspace-a" },
       workspace: null,
-      isGit: false,
+      checkoutStatus: undefined,
     });
 
     expect(result).toEqual({
@@ -64,7 +75,7 @@ describe("resolveCompactExplorerSidebarHostModel", () => {
       previous,
       selection: { serverId: "server-1", workspaceId: "workspace-b" },
       workspace: null,
-      isGit: false,
+      checkoutStatus: undefined,
     });
 
     expect(result).toEqual({
@@ -81,7 +92,7 @@ describe("resolveCompactExplorerSidebarHostModel", () => {
       previous: createModel(),
       selection: null,
       workspace: null,
-      isGit: false,
+      checkoutStatus: undefined,
     });
 
     expect(result).toBeNull();
@@ -92,7 +103,7 @@ describe("resolveCompactExplorerSidebarHostModel", () => {
       previous: null,
       selection: { serverId: "server-1", workspaceId: "workspace-a" },
       workspace: createWorkspace({ id: "workspace-a", workspaceDirectory: "/repo/current" }),
-      isGit: true,
+      checkoutStatus: { cwd: "/repo/current", isGit: true, error: null },
     });
 
     expect(result).toEqual({
@@ -102,5 +113,102 @@ describe("resolveCompactExplorerSidebarHostModel", () => {
       workspaceRoot: "/repo/current",
       isGit: true,
     });
+  });
+
+  it.each([
+    {
+      error: { code: "NOT_ALLOWED" as const, message: "Git activity paused" },
+      refreshState: "paused" as const,
+    },
+    { error: null, refreshState: "paused" as const },
+    {
+      error: { code: "UNKNOWN" as const, message: "Status unavailable" },
+      refreshState: "unknown" as const,
+    },
+    { error: null, refreshState: "unknown" as const },
+  ])("does not treat an unavailable status as a non-Git fact: %j", ({ error, refreshState }) => {
+    const result = resolveCompactExplorerSidebarHostModel({
+      previous: null,
+      selection: { serverId: "server-1", workspaceId: "workspace-a" },
+      workspace: createWorkspace({ id: "workspace-a" }),
+      checkoutStatus: { cwd: "/repo", isGit: false, error, refreshState },
+    });
+
+    expect(result?.isGit).toBe(true);
+  });
+
+  it("honors a successful non-Git status over older project metadata", () => {
+    const result = resolveCompactExplorerSidebarHostModel({
+      previous: createModel(),
+      selection: { serverId: "server-1", workspaceId: "workspace-a" },
+      workspace: createWorkspace({ id: "workspace-a" }),
+      checkoutStatus: { cwd: "/repo", isGit: false, error: null, refreshState: "fresh" },
+    });
+
+    expect(result?.isGit).toBe(false);
+  });
+
+  it.each(["non_git", "directory"] as const)(
+    "does not invent Git identity for %s projects",
+    (projectKind) => {
+      const result = resolveCompactExplorerSidebarHostModel({
+        previous: createModel(),
+        selection: { serverId: "server-1", workspaceId: "workspace-a" },
+        workspace: createWorkspace({ id: "workspace-a", projectKind, workspaceKind: "directory" }),
+        checkoutStatus: { cwd: "/repo", isGit: false, error: null, refreshState: "paused" },
+      });
+
+      expect(result?.isGit).toBe(false);
+    },
+  );
+
+  it("accepts a successful Git status for a directory project", () => {
+    const result = resolveCompactExplorerSidebarHostModel({
+      previous: null,
+      selection: { serverId: "server-1", workspaceId: "workspace-a" },
+      workspace: createWorkspace({
+        id: "workspace-a",
+        projectKind: "directory",
+        workspaceKind: "directory",
+      }),
+      checkoutStatus: { cwd: "/repo", isGit: true, error: null },
+    });
+
+    expect(result?.isGit).toBe(true);
+  });
+
+  it("ignores status from a previous directory", () => {
+    const result = resolveCompactExplorerSidebarHostModel({
+      previous: createModel(),
+      selection: { serverId: "server-1", workspaceId: "workspace-a" },
+      workspace: createWorkspace({ id: "workspace-a", workspaceDirectory: "/new" }),
+      checkoutStatus: { cwd: "/repo/a", isGit: false, error: null },
+    });
+
+    expect(result?.workspaceRoot).toBe("/new");
+    expect(result?.isGit).toBe(true);
+  });
+
+  it("does not retain a Git identity across hosts with the same workspace id", () => {
+    const result = resolveCompactExplorerSidebarHostModel({
+      previous: createModel(),
+      selection: { serverId: "server-2", workspaceId: "workspace-a" },
+      workspace: null,
+      checkoutStatus: { cwd: "/repo/a", isGit: true, error: null },
+    });
+
+    expect(result?.workspaceRoot).toBe("");
+    expect(result?.isGit).toBe(false);
+  });
+
+  it("does not adopt a descriptor for a different selected workspace", () => {
+    const result = resolveCompactExplorerSidebarHostModel({
+      previous: createModel(),
+      selection: { serverId: "server-1", workspaceId: "workspace-b" },
+      workspace: createWorkspace({ id: "workspace-a" }),
+    });
+
+    expect(result?.workspaceRoot).toBe("");
+    expect(result?.isGit).toBe(false);
   });
 });

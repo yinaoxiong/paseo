@@ -72,9 +72,9 @@ function useActiveCompactExplorerSidebarModel(
         previous: isExplorerActive ? retainedModelRef.current : null,
         selection,
         workspace,
-        isGit: checkoutQuery.data?.isGit ?? false,
+        checkoutStatus: checkoutQuery.data,
       }),
-    [checkoutQuery.data?.isGit, isExplorerActive, selection, workspace],
+    [checkoutQuery.data, isExplorerActive, selection, workspace],
   );
 
   useEffect(() => {

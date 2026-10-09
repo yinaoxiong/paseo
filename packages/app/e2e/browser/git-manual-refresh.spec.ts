@@ -7,8 +7,176 @@ import { gotoWorkspace } from "../support/helpers/launcher";
 import { openChangesTreePanel } from "../support/helpers/workspace-tabs";
 import { daemonWsRoutePattern } from "../support/helpers/daemon-port";
 import { connectNewWorkspaceDaemonClient } from "../support/helpers/new-workspace";
+import { buildHostWorkspaceRoute } from "../../src/utils/host-routes";
+import { getServerId } from "../support/helpers/server-id";
+import {
+  openMobileAgentSidebar,
+  expectMobileAgentSidebarVisible,
+} from "../support/helpers/sidebar";
 
 test.use({ e2eDaemonConfig: { daemon: { git: { policy: "manual" } } } });
+
+test("compact manual Changes remains reachable from a cold cache and does not leak across workspaces", async ({
+  page,
+  e2eWorker,
+}, info) => {
+  info.setTimeout(180_000);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const workspace = await seedWorkspace({ repoPrefix: "git-compact-manual-" });
+  const other = await seedWorkspace({ repoPrefix: "git-compact-other-" });
+  const directory = await seedWorkspace({ repoPrefix: "git-compact-directory-", git: false });
+  let diffReads = 0;
+  let diffSubscriptions = 0;
+  let refreshRequests = 0;
+  let coldPausedStatus = false;
+  let failNextRefresh = false;
+  const envelopeSchema = z.object({
+    message: z
+      .object({
+        type: z.string(),
+        cwd: z.string().optional(),
+        requestId: z.string().optional(),
+        payload: z
+          .object({
+            cwd: z.string().optional(),
+            isGit: z.boolean().optional(),
+            refreshState: z.string().optional(),
+          })
+          .passthrough()
+          .optional(),
+      })
+      .passthrough()
+      .optional(),
+  });
+  await page.routeWebSocket(daemonWsRoutePattern(), (browser) => {
+    const server = browser.connectToServer();
+    browser.onMessage((raw) => {
+      const parsed = typeof raw === "string" ? envelopeSchema.safeParse(JSON.parse(raw)) : null;
+      const message = parsed?.success ? parsed.data.message : undefined;
+      if (message?.type === "checkout.diff.get.request") diffReads += 1;
+      if (message?.type === "subscribe_checkout_diff_request") diffSubscriptions += 1;
+      if (message?.type === "checkout.refresh.request") {
+        refreshRequests += 1;
+        if (failNextRefresh) {
+          failNextRefresh = false;
+          browser.send(
+            JSON.stringify({
+              type: "session",
+              message: {
+                type: "checkout.refresh.response",
+                payload: {
+                  cwd: message.cwd,
+                  requestId: message.requestId,
+                  success: false,
+                  error: { code: "UNKNOWN", message: "Injected compact refresh failure" },
+                },
+              },
+            }),
+          );
+          return;
+        }
+      }
+      server.send(raw);
+    });
+    server.onMessage((raw) => {
+      const parsed = typeof raw === "string" ? envelopeSchema.safeParse(JSON.parse(raw)) : null;
+      const message = parsed?.success ? parsed.data.message : undefined;
+      if (
+        message?.type === "checkout_status_response" &&
+        message.payload?.cwd === workspace.workspaceDirectory &&
+        message.payload.refreshState === "paused" &&
+        message.payload.isGit === false
+      )
+        coldPausedStatus = true;
+      browser.send(raw);
+    });
+  });
+  const openCompactChanges = async (workspaceId: string) => {
+    await page.goto(buildHostWorkspaceRoute(getServerId(), workspaceId));
+    const toggle = page.getByTestId("workspace-explorer-toggle").filter({ visible: true }).first();
+    await expect(toggle).toBeVisible({ timeout: 30_000 });
+    await toggle.click();
+    await expect(page.getByTestId("explorer-tab-files")).toBeVisible();
+    await expect(page.getByTestId("explorer-tab-changes")).toBeVisible();
+    await page.getByTestId("explorer-tab-changes").click();
+  };
+  try {
+    await writeFile(
+      path.join(workspace.repoPath, "README.md"),
+      "# Temp Repo\ncompact manual change\n",
+    );
+    await e2eWorker.restart();
+    await openCompactChanges(workspace.workspaceId);
+    await expect.poll(() => coldPausedStatus).toBe(true);
+    await expect(
+      page.getByText("Refresh to read Git state.").filter({ visible: true }).first(),
+    ).toBeVisible();
+    const refresh = page.getByTestId("changes-refresh").filter({ visible: true }).first();
+    expect(refreshRequests).toBe(0);
+    expect(diffReads).toBe(0);
+    await page.screenshot({ path: info.outputPath("compact-cold-changes.png") });
+
+    await refresh.click();
+    await expect(page.getByTestId("git-diff-canvas").filter({ visible: true })).toBeVisible();
+    await expect(page.getByTestId("changes-jump-to-file")).toBeVisible();
+    expect(refreshRequests).toBe(1);
+    expect(diffReads).toBe(1);
+    await page.getByTestId("changes-jump-to-file").click();
+    const fileSheet = page.getByRole("slider", { name: "Bottom Sheet", exact: true });
+    await expect(fileSheet.getByText("README.md", { exact: true })).toBeVisible();
+    await fileSheet.getByText("README.md", { exact: true }).click();
+    await expect(fileSheet).toHaveCount(0);
+    await page.screenshot({ path: info.outputPath("compact-manual-diff.png") });
+
+    await writeFile(
+      path.join(workspace.repoPath, "second-compact.txt"),
+      "requires explicit refresh\n",
+    );
+    await openCompactChanges(workspace.workspaceId);
+    await expect(
+      page.getByText("Refresh to read this diff").filter({ visible: true }).first(),
+    ).toBeVisible();
+    expect(refreshRequests).toBe(1);
+    expect(diffReads).toBe(1);
+    failNextRefresh = true;
+    await refresh.click();
+    await expect(page.getByTestId("changes-refresh-error")).toHaveText(
+      "Injected compact refresh failure",
+    );
+    await expect(refresh).toBeEnabled();
+    await refresh.click();
+    await expect(page.getByTestId("changes-refresh-error")).toHaveCount(0);
+    await expect.poll(() => diffReads).toBe(2);
+    await page.getByTestId("changes-jump-to-file").click();
+    await expect(fileSheet.getByText("second-compact.txt", { exact: true })).toBeVisible();
+    await fileSheet.getByText("second-compact.txt", { exact: true }).click();
+
+    const switchWorkspace = async (workspaceId: string) => {
+      await page.getByTestId("explorer-close").click();
+      await openMobileAgentSidebar(page);
+      await expectMobileAgentSidebarVisible(page);
+      await page.getByTestId(`sidebar-workspace-row-${getServerId()}:${workspaceId}`).click();
+      await expect(page).toHaveURL(new RegExp(`/workspace/${workspaceId}`));
+      await page.getByTestId("workspace-explorer-toggle").filter({ visible: true }).first().click();
+      await expect(page.getByTestId("explorer-tab-files")).toBeVisible();
+    };
+    await switchWorkspace(other.workspaceId);
+    await page.getByTestId("explorer-tab-changes").click();
+    await expect(
+      page.getByText("Refresh to read Git state.").filter({ visible: true }).first(),
+    ).toBeVisible();
+    await expect(page.getByTestId("git-diff-canvas").filter({ visible: true })).toHaveCount(0);
+    await switchWorkspace(directory.workspaceId);
+    await expect(page.getByTestId("explorer-tab-changes")).toHaveCount(0);
+    expect(refreshRequests).toBe(3);
+    expect(diffReads).toBe(2);
+    expect(diffSubscriptions).toBe(0);
+  } finally {
+    await workspace.cleanup();
+    await other.cleanup();
+    await directory.cleanup();
+  }
+});
 
 test("manual Git refresh works from a cold workspace, stays manual, and can retry", async ({
   page,
