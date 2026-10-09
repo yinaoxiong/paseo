@@ -58,6 +58,11 @@ opening a file leaves that dock visible. Both presentations keep their selection
 and reuse the layout store's per-workspace Explorer width. They do not create a second Explorer
 lifecycle.
 
+Keep Changes reachable for a known Git workspace while its status is unavailable. Manual Git
+policy can return a paused, uncached status whose required `isGit: false` is a placeholder.
+That response must not hide the explicit refresh entry. Opening Explorer does not grant permission
+to read Git; the manual refresh action owns that permission.
+
 ## Side pane
 
 `packages/app/src/workspace-tabs/open-beside.ts` owns content opened beside the user's work. The
