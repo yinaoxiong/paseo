@@ -17,9 +17,9 @@ on:
         type: string
         required: true
       build_scope:
-        description: Build five npm packages and native installers, or only verify online CLI installation.
+        description: Build everything, verify online CLI installation, or build only the Android APK.
         type: choice
-        options: [all, online-verify]
+        options: [all, online-verify, android-only]
         default: all
         required: true
       npm_candidate_run_id:
@@ -78,7 +78,7 @@ jobs:
           PASEO_MAC_ARCHIVE_RUN_ID: ${{ inputs.mac_archive_run_id }}
         run: node scripts/personal/resolve-npm-candidate.mjs
   cli:
-    if: inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == ''
+    if: inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'android-only'
     needs: resolve
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -112,7 +112,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-    if: ${{ !cancelled() && inputs.mac_archive_run_id == '' && needs.resolve.result == 'success' && (needs.cli.result == 'success' || inputs.npm_candidate_run_id != '') }}
+    if: ${{ !cancelled() && inputs.build_scope != 'android-only' && inputs.mac_archive_run_id == '' && needs.resolve.result == 'success' && (needs.cli.result == 'success' || inputs.npm_candidate_run_id != '') }}
     needs: [resolve, cli]
     env:
       PASEO_NPM_CANDIDATE_RUN_ID: ${{ inputs.npm_candidate_run_id }}
@@ -199,7 +199,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   android:
-    if: inputs.mac_archive_run_id == '' && inputs.build_scope == 'all'
+    if: inputs.mac_archive_run_id == '' && (inputs.build_scope == 'all' || inputs.build_scope == 'android-only')
     needs: resolve
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -264,7 +264,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   mac-archive-verification:
-    if: inputs.mac_archive_run_id != ''
+    if: inputs.mac_archive_run_id != '' && inputs.build_scope != 'android-only'
     needs: resolve
     runs-on: macos-14
     timeout-minutes: 30

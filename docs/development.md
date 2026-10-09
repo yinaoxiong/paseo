@@ -154,6 +154,8 @@ The public fork runs `Personal Checks` on personal branches/PRs and `Personal Bu
 only on manual dispatch. `online-verify` builds five universal npm candidates once
 and validates the same files on three systems without desktop/APK signing steps;
 `all` also builds the Mac and Windows Apps and Android APK.
+`android-only` builds just the signed personal APK, skipping npm candidate/installation and
+desktop jobs. Use a new personal revision for an APK update; it retains the package ID and signer.
 The existing Mac archive verification mode still reuses the accepted archive. Builds accept a full source SHA and personal revision;
 the resolver admits only commits in the validated personal lineage and current
 `personal/stable`. Signing credentials are not exposed to PR checks.
