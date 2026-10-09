@@ -43,9 +43,8 @@ import {
 const repoRoot = new URL("../", import.meta.url);
 test("replayed CI admits the reviewed overlay and handles absent or unrelated push bases", () => {
   const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-  const official = execFileSync("git", ["rev-parse", "v0.11.2^{commit}"], {
-    encoding: "utf8",
-  }).trim();
+  // Fork CI has the upstream commit through ancestry, but need not have its tag ref.
+  const official = "75953250959979b8f088bbca8dbd6ee61d0151b1";
   assert.doesNotThrow(() => assertTrustedPersonalSource(head));
   assert.throws(() => assertTrustedPersonalSource(official));
   assert.throws(() => assertTrustedPersonalSource("3916a1e615bb8f084e418bc7f205ea8d4fc40255"));
