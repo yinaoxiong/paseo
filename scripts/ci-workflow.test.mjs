@@ -11,6 +11,7 @@ import {
 import test from "node:test";
 import { createRequire } from "node:module";
 import { load as loadYaml } from "js-yaml";
+import { runInNewContext } from "node:vm";
 import {
   cliTarget,
   assertMacScratchInfo,
@@ -367,16 +368,23 @@ test("personal CI builds are manual, source pinned and least privileged", () => 
   ]);
   assert.equal(
     build.jobs.cli.if,
-    "inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == ''",
+    "inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'android-only'",
   );
   assert.match(build.jobs["npm-install"].if, /!cancelled\(\).*needs\.cli\.result/);
   assert.deepEqual(build.jobs["npm-install"].permissions, { contents: "read", actions: "read" });
-  for (const key of ["desktop", "android"])
-    assert.equal(
-      build.jobs[key].if,
-      "inputs.mac_archive_run_id == '' && inputs.build_scope == 'all'",
-    );
-  assert.deepEqual(build.on.workflow_dispatch.inputs.build_scope.options, ["all", "online-verify"]);
+  assert.equal(
+    build.jobs.desktop.if,
+    "inputs.mac_archive_run_id == '' && inputs.build_scope == 'all'",
+  );
+  assert.equal(
+    build.jobs.android.if,
+    "inputs.mac_archive_run_id == '' && (inputs.build_scope == 'all' || inputs.build_scope == 'android-only')",
+  );
+  assert.deepEqual(build.on.workflow_dispatch.inputs.build_scope.options, [
+    "all",
+    "online-verify",
+    "android-only",
+  ]);
   assert.equal(build.on.workflow_dispatch.inputs.build_scope.default, "all");
   assert.deepEqual(build.jobs["npm-install"].needs, ["resolve", "cli"]);
   assert.deepEqual(build.jobs["npm-install"].strategy.matrix.include, [
@@ -390,7 +398,10 @@ test("personal CI builds are manual, source pinned and least privileged", () => 
   );
   assert.match(JSON.stringify(build.jobs["npm-install"]), /personal-npm-candidates/);
   const verification = build.jobs["mac-archive-verification"];
-  assert.equal(verification.if, "inputs.mac_archive_run_id != ''");
+  assert.equal(
+    verification.if,
+    "inputs.mac_archive_run_id != '' && inputs.build_scope != 'android-only'",
+  );
   assert.equal(verification.needs, "resolve");
   assert.deepEqual(verification.permissions, { contents: "read", actions: "read" });
   assert.equal(verification.steps[0].with.ref, "${{ needs.resolve.outputs.sha }}");
@@ -404,6 +415,42 @@ test("personal CI builds are manual, source pinned and least privileged", () => 
   assert.doesNotMatch(JSON.stringify(checks), /secrets\./);
 });
 const ciWorkflowPath = new URL(".github/workflows/ci.yml", repoRoot);
+test("personal build scope routes only the selected platform jobs", () => {
+  const build = loadYaml(
+    readFileSync(new URL(".github/workflows/personal-build.yml", repoRoot), "utf8"),
+  );
+  const scenarios = [
+    { scope: "all", expected: ["cli", "npm-install", "desktop", "android"] },
+    { scope: "online-verify", expected: ["cli", "npm-install"] },
+    { scope: "android-only", expected: ["android"] },
+    { scope: "all", mac: "123", expected: ["mac-archive-verification"] },
+    { scope: "online-verify", candidate: "123", expected: ["npm-install"] },
+    { scope: "android-only", mac: "123", expected: [] },
+  ];
+  for (const { scope, mac = "", candidate = "", expected } of scenarios) {
+    const selected = Object.entries(build.jobs)
+      .filter(([id]) => id !== "resolve")
+      .filter(([, job]) => {
+        // These job guards use only the JS-compatible subset of GitHub expressions.
+        const expression = job.if.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
+        return runInNewContext(
+          expression,
+          {
+            inputs: {
+              build_scope: scope,
+              mac_archive_run_id: mac,
+              npm_candidate_run_id: candidate,
+            },
+            needs: { resolve: { result: "success" }, cli: { result: "success" } },
+            cancelled: () => false,
+          },
+          { timeout: 100 },
+        );
+      })
+      .map(([id]) => id);
+    assert.deepEqual(selected, expected, `scope=${scope}, mac=${mac}, candidate=${candidate}`);
+  }
+});
 const dockerWorkflowPath = new URL(".github/workflows/docker.yml", repoRoot);
 const nixWorkflowPath = new URL(".github/workflows/nix.yml", repoRoot);
 const filtersPath = new URL(".github/ci-paths.yml", repoRoot);
