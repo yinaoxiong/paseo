@@ -187,13 +187,20 @@ reconciliation stay outside CI.
 After an uncertain result, reconcile the exact registry integrity before resuming;
 never rerun the entire publisher blindly or overwrite an immutable npm version.
 
-New packages must exist before npm lets you configure Trusted Publishing. The first
-approved publication uses a short-lived granular `PASEO_NPM_BOOTSTRAP_TOKEN` Secret,
-restricted to `@yinaoxiong` with publish access and CI 2FA bypass. Do not put the token
-in source, artifacts or chat. After bootstrap, configure GitHub Trusted Publisher for
-`yinaoxiong/paseo`, `personal-npm-publish.yml`, with direct publish permission, then
-revoke the bootstrap token. Publication of the concrete batch still requires user
-approval; a candidate tarball alone cannot resolve the other four unpublished packages.
+The publisher defaults to `trusted` and uses GitHub OIDC without a stored npm token.
+Before using that mode, configure each of the five packages to trust
+`yinaoxiong/paseo`, workflow `personal-npm-publish.yml`, with direct publish permission.
+Official `npm trust` commands require npm 11.15 or newer and account-level 2FA;
+a granular token with 2FA bypass cannot configure trust. Keep setup authentication
+in a temporary userconfig and complete account verification in the browser.
+
+New packages must already exist before configuring trust. Their first approved
+publication can explicitly select `bootstrap`, using the short-lived
+`PASEO_NPM_BOOTSTRAP_TOKEN` Secret restricted to `@yinaoxiong`. Never put its value
+in source, artifacts or chat. Retain that Secret until a new-version publication
+has succeeded in `trusted` mode, then revoke the token and remove the Secret.
+Publication still requires approval for the concrete batch; configuring trust
+does not authorize a test version or replacement of an existing version.
 
 ## Running the dev server
 
