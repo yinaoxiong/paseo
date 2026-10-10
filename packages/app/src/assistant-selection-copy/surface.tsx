@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { View, type StyleProp, type ViewStyle } from "react-native";
+import { type StyleProp, type ViewStyle } from "react-native";
+import { MobilePanelScrollViewport } from "@/mobile-panels/provider";
 
 interface AssistantSelectionCopySurfaceProps {
   children: ReactNode;
@@ -10,5 +11,5 @@ export function AssistantSelectionCopySurface({
   children,
   style,
 }: AssistantSelectionCopySurfaceProps) {
-  return <View style={style}>{children}</View>;
+  return <MobilePanelScrollViewport style={style}>{children}</MobilePanelScrollViewport>;
 }

@@ -10,14 +10,17 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { Keyboard, useWindowDimensions } from "react-native";
+import { Keyboard, View, useWindowDimensions, type StyleProp, type ViewStyle } from "react-native";
 import type { GestureType } from "react-native-gesture-handler";
 import {
   cancelAnimation,
   Easing,
   useAnimatedReaction,
   useSharedValue,
+  useAnimatedRef,
   withTiming,
+  measure,
+  type AnimatedRef,
   type SharedValue,
 } from "react-native-reanimated";
 import { scheduleOnRN, scheduleOnUI } from "react-native-worklets";
@@ -37,6 +40,13 @@ import {
   type MobilePanelMotionState,
   type MobilePanelTransition,
 } from "./model";
+import {
+  isMobilePanelGestureRegionHit,
+  isPointInMobilePanelGestureFrame,
+  type MobilePanelGestureRegion,
+  type MobilePanelGestureFrame,
+} from "./gesture-regions";
+import { createAnimatedViewRef } from "./native-measurement-ref";
 
 const ANIMATION_DURATION = 220;
 const ANIMATION_EASING = Easing.bezier(0.25, 0.1, 0.25, 1);
@@ -53,7 +63,17 @@ interface MobilePanelsRuntime {
   rightOpenGestureRef: RefObject<GestureType | undefined>;
   updateGesture: (startedRevision: number, nextPosition: number) => boolean;
   setOpenGestureBlocked: (owner: symbol, blocked: boolean) => void;
+  isOpeningTouchInScrollRegion: (absoluteX: number, absoluteY: number) => boolean;
+  setOpenGestureSurface: (owner: symbol, surface: MobilePanelGestureSurface | null) => void;
   windowWidth: number;
+}
+
+export interface MobilePanelGestureSurface {
+  ref: AnimatedRef<View>;
+  viewportRefs: readonly AnimatedRef<View>[];
+  layoutWidth: number;
+  layoutHeight: number;
+  regions: readonly MobilePanelGestureRegion[];
 }
 
 interface BeginGestureInput {
@@ -68,6 +88,7 @@ interface FinishGestureInput {
 
 const MobilePanelsContext = createContext<MobilePanelsRuntime | null>(null);
 const MobilePanelActiveContext = createContext<MobilePanelView>("agent");
+const MobilePanelScrollViewportContext = createContext<readonly AnimatedRef<View>[]>([]);
 
 export function MobilePanelsProvider({ children }: { children: ReactNode }) {
   const { width: windowWidth } = useWindowDimensions();
@@ -76,6 +97,8 @@ export function MobilePanelsProvider({ children }: { children: ReactNode }) {
   const motionState = useSharedValue(createMobilePanelMotionState(initialSelection));
   const openGesturesBlocked = useSharedValue(false);
   const openGestureBlockersRef = useRef(new Set<symbol>());
+  const openGestureSurfacesRef = useRef(new Map<symbol, MobilePanelGestureSurface>());
+  const openGestureSurfaces = useSharedValue<MobilePanelGestureSurface[]>([]);
   const leftOpenGestureRef = useRef<GestureType | undefined>(undefined);
   const leftCloseGestureRef = useRef<GestureType | undefined>(undefined);
   const rightOpenGestureRef = useRef<GestureType | undefined>(undefined);
@@ -92,6 +115,45 @@ export function MobilePanelsProvider({ children }: { children: ReactNode }) {
       openGesturesBlocked.value = openGestureBlockersRef.current.size > 0;
     },
     [openGesturesBlocked],
+  );
+
+  const setOpenGestureSurface = useCallback(
+    (owner: symbol, surface: MobilePanelGestureSurface | null) => {
+      if (surface) openGestureSurfacesRef.current.set(owner, surface);
+      else openGestureSurfacesRef.current.delete(owner);
+      openGestureSurfaces.value = [...openGestureSurfacesRef.current.values()];
+    },
+    [openGestureSurfaces],
+  );
+  const isOpeningTouchInScrollRegion = useCallback(
+    (absoluteX: number, absoluteY: number): boolean => {
+      "worklet";
+      for (const surface of openGestureSurfaces.value) {
+        const frame = measure(surface.ref);
+        if (!frame || !isPointInMobilePanelGestureFrame(absoluteX, absoluteY, frame)) continue;
+        const viewports: MobilePanelGestureFrame[] = [];
+        for (const viewportRef of surface.viewportRefs) {
+          const viewport = measure(viewportRef);
+          if (!viewport || !isPointInMobilePanelGestureFrame(absoluteX, absoluteY, viewport)) break;
+          viewports.push(viewport);
+        }
+        if (viewports.length !== surface.viewportRefs.length) continue;
+        if (
+          isMobilePanelGestureRegionHit({
+            absoluteX,
+            absoluteY,
+            frame,
+            viewports,
+            layoutWidth: surface.layoutWidth,
+            layoutHeight: surface.layoutHeight,
+            regions: surface.regions,
+          })
+        )
+          return true;
+      }
+      return false;
+    },
+    [openGestureSurfaces],
   );
 
   const publishActivePanel = useCallback((panel: MobilePanelView, revision: number) => {
@@ -226,6 +288,8 @@ export function MobilePanelsProvider({ children }: { children: ReactNode }) {
       rightOpenGestureRef,
       updateGesture,
       setOpenGestureBlocked,
+      isOpeningTouchInScrollRegion,
+      setOpenGestureSurface,
       windowWidth,
     }),
     [
@@ -235,6 +299,8 @@ export function MobilePanelsProvider({ children }: { children: ReactNode }) {
       openGesturesBlocked,
       position,
       setOpenGestureBlocked,
+      isOpeningTouchInScrollRegion,
+      setOpenGestureSurface,
       updateGesture,
       windowWidth,
     ],
@@ -270,4 +336,53 @@ export function useBlockMobilePanelOpenGestures(blocked: boolean): void {
     setOpenGestureBlocked(owner, blocked);
     return () => setOpenGestureBlocked(owner, false);
   }, [blocked, owner, setOpenGestureBlocked]);
+}
+
+/** Register layout ahead of touch; never send touch events through React or the HTML bridge. */
+export function useMobilePanelScrollSurface(
+  surface: Omit<MobilePanelGestureSurface, "viewportRefs"> | null,
+): void {
+  const context = useContext(MobilePanelsContext);
+  const viewportRefs = useContext(MobilePanelScrollViewportContext);
+  const owner = useRef(Symbol("mobile-panel-scroll-surface")).current;
+  const setSurface = context?.setOpenGestureSurface;
+  useLayoutEffect(() => {
+    setSurface?.(owner, surface && viewportRefs.length ? { ...surface, viewportRefs } : null);
+    return () => setSurface?.(owner, null);
+  }, [owner, setSurface, surface, viewportRefs]);
+}
+
+export function MobilePanelScrollViewportBoundary({
+  children,
+  viewportRef,
+}: {
+  children: ReactNode;
+  viewportRef: AnimatedRef<View>;
+}) {
+  const parents = useContext(MobilePanelScrollViewportContext);
+  const viewports = useMemo(() => [...parents, viewportRef], [parents, viewportRef]);
+  return (
+    <MobilePanelScrollViewportContext.Provider value={viewports}>
+      {children}
+    </MobilePanelScrollViewportContext.Provider>
+  );
+}
+
+/** The existing non-inverted chat root supplies clipping without adding a layout wrapper. */
+export function MobilePanelScrollViewport({
+  children,
+  style,
+}: {
+  children: ReactNode;
+  style?: StyleProp<ViewStyle>;
+}) {
+  const viewportRef = useAnimatedRef<View>();
+  const attachViewport = useMemo(() => createAnimatedViewRef(viewportRef), [viewportRef]);
+  return (
+    <MobilePanelScrollViewportBoundary viewportRef={viewportRef}>
+      <View ref={attachViewport} collapsable={false} style={style}>
+        {children}
+      </View>
+    </MobilePanelScrollViewportBoundary>
+  );
 }

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { MathFormula } from "./math-formula.web";
 import { mathRuntimeHtml } from "./markdown/math/runtime/html.gen";
 import { renderKatexFormulaHtml } from "./math-formula-html";
+import { createAnimatedViewRef } from "@/mobile-panels/native-measurement-ref";
 import {
   parseMathRuntimeMessage,
   type MathRuntimeMessage,
@@ -17,6 +18,29 @@ interface MountedFormula {
 
 const mountedFormulas: MountedFormula[] = [];
 const mountedMathFrames: HTMLIFrameElement[] = [];
+
+describe("measured ref React lifecycle", () => {
+  it("mounts and unmounts through React without using a native handle as a cleanup", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const calls: Array<HTMLDivElement | null> = [];
+    const callback = createAnimatedViewRef((node: HTMLDivElement | null) => {
+      calls.push(node);
+      return { nativeWrapper: true };
+    });
+    try {
+      act(() => root.render(<div ref={callback} />));
+      const view = container.firstElementChild;
+      expect(calls).toEqual([view]);
+      act(() => root.render(null));
+      expect(calls).toEqual([view, null]);
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  });
+});
 
 function mountFormula(props: {
   expression: string;
@@ -100,6 +124,62 @@ function mathRequest(
 }
 
 describe("Android offline math HTML runtime", () => {
+  it("keeps short inline fractions on the surrounding prose baseline", async () => {
+    const frame = await mountMathFrame();
+    const formula = renderKatexFormulaHtml("\\frac{1}{2}", false);
+    await mathRequest(frame, {
+      revision: 1,
+      width: 300,
+      html: `<div id="reference"><span class="prose">中文</span> <span style="font-size:.9em;vertical-align:baseline">${formula}</span></div><div id="actual"><span class="prose">中文</span> <span class="paseo-inline-math">${formula}</span></div>`,
+    });
+    const document = frame.contentDocument;
+    if (!document) throw new Error("Expected frame document");
+    function baselineOffset(selector: string) {
+      const prose = document?.querySelector(`${selector} .prose`);
+      const math = document?.querySelector(`${selector} .katex-html .base`);
+      if (!prose || !math) throw new Error("Expected rendered text and math");
+      return math.getBoundingClientRect().top - prose.getBoundingClientRect().top;
+    }
+    expect(baselineOffset("#actual")).toBeCloseTo(baselineOffset("#reference"), 1);
+  });
+
+  it("reports only overflowing formula bounds and updates them after resize", async () => {
+    const frame = await mountMathFrame();
+    const expression = Array.from({ length: 18 }, (_, index) => `x_{${index}}`).join("+");
+    const html = `普通文字<div class="paseo-display-math">${renderKatexFormulaHtml(expression, true)}</div>后面文字`;
+    const narrow = await mathRequest(frame, { revision: 1, html, width: 200 });
+    if (narrow.type !== "size") throw new Error("Expected measured size");
+    expect(narrow.horizontalScrollRegions).toHaveLength(1);
+    const [region] = narrow.horizontalScrollRegions;
+    expect(region.x).toBe(0);
+    expect(region.y).toBeGreaterThan(0);
+    expect(region.width).toBe(200);
+    expect(region.height).toBeGreaterThan(0);
+    const wide = await mathRequest(frame, { revision: 2, html, width: 2000 });
+    if (wide.type !== "size") throw new Error("Expected measured size");
+    expect(wide.horizontalScrollRegions).toEqual([]);
+  });
+
+  it("bounds long inline math while leaving short inline fractions unblocked", async () => {
+    const frame = await mountMathFrame();
+    const expression = Array.from({ length: 18 }, (_, index) => `x_{${index}}`).join("+");
+    const html = `前文 <span class="paseo-inline-math">${renderKatexFormulaHtml(`\\frac{${expression}}{1}`, false)}</span> 后文`;
+    const result = await mathRequest(frame, { revision: 1, html, width: 200 });
+    if (result.type !== "size") throw new Error("Expected measured size");
+    expect(result.horizontalScrollRegions).toHaveLength(1);
+    const [region] = result.horizontalScrollRegions;
+    expect(region.x + region.width).toBeLessThanOrEqual(200);
+    expect(region.y + region.height).toBeLessThanOrEqual(result.height);
+    expect(frame.contentDocument?.getElementById("content")?.textContent).toContain("后文");
+    const short = await mathRequest(frame, {
+      revision: 2,
+      html: `前文 <span class="paseo-inline-math">${renderKatexFormulaHtml("\\frac{1}{2}", false)}</span> 后文`,
+      width: 200,
+    });
+    if (short.type !== "size") throw new Error("Expected measured size");
+    expect(short.horizontalScrollRegions).toEqual([]);
+  });
+
   it("loads embedded fonts and measures a real inline fraction with Chinese text", async () => {
     const frame = await mountMathFrame();
     const html = `中文 <span class="paseo-inline-math">${renderKatexFormulaHtml("\\frac{1}{2}", false)}</span> 后面文字`;

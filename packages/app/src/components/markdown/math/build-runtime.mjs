@@ -41,6 +41,7 @@ html,body{margin:0;padding:0;background:transparent;overflow:hidden}
 #content{box-sizing:border-box;display:flow-root;overflow-wrap:anywhere;font-family:system-ui,sans-serif}
 a{color:var(--link-color);text-decoration:none} code{color:var(--code-color);background:var(--code-background);font-family:monospace;white-space:pre-wrap}
 .paseo-inline-math{font-size:.9em;vertical-align:baseline}
+.paseo-scrollable-inline-math{display:inline-block;max-width:100%;overflow-x:auto;overflow-y:hidden}
 .paseo-display-math{display:block;max-width:100%;overflow-x:auto;overflow-y:hidden}
 .katex-display{margin:.25em 0}.katex{color:inherit}
 </style></head><body><div id="content"></div><script>${javascript}</script></body></html>`;

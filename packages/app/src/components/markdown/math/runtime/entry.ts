@@ -13,6 +13,7 @@ const host = content;
 let latestRevision = 0;
 let startedAt = 0;
 let measuredHeight = 0;
+let measuredRegions = "";
 let measuringRevision = 0;
 
 function send(message: MathRuntimeMessage): void {
@@ -23,8 +24,28 @@ function send(message: MathRuntimeMessage): void {
 function measure(): void {
   if (!latestRevision || measuringRevision !== latestRevision) return;
   const height = Math.ceil(host.getBoundingClientRect().height);
-  if (height < 1 || height === measuredHeight) return;
+  const bounds = host.getBoundingClientRect();
+  const horizontalScrollRegions = Array.from(
+    host.querySelectorAll<HTMLElement>(".paseo-display-math, .paseo-inline-math"),
+  )
+    .filter((element) => element.scrollWidth > element.clientWidth + 1)
+    .slice(0, 64)
+    .map((element) => {
+      const rect = element.getBoundingClientRect();
+      const x = Math.max(0, rect.left - bounds.left);
+      const y = Math.max(0, rect.top - bounds.top);
+      return {
+        x,
+        y,
+        width: Math.max(0, Math.min(rect.width, bounds.width - x)),
+        height: Math.max(0, Math.min(rect.height, height - y)),
+      };
+    })
+    .filter((region) => region.width > 0 && region.height > 0);
+  const regionsKey = JSON.stringify(horizontalScrollRegions);
+  if (height < 1 || (height === measuredHeight && regionsKey === measuredRegions)) return;
   measuredHeight = height;
+  measuredRegions = regionsKey;
   let fontCount = 0;
   document.fonts.forEach((font) => {
     if (font.status === "loaded" && font.family.startsWith("KaTeX_")) fontCount++;
@@ -36,6 +57,7 @@ function measure(): void {
     height,
     fontCount,
     renderMs: Math.max(0, performance.now() - startedAt),
+    horizontalScrollRegions,
   });
 }
 
@@ -45,6 +67,7 @@ async function receive(value: unknown): Promise<void> {
   latestRevision = request.revision;
   startedAt = performance.now();
   measuredHeight = 0;
+  measuredRegions = "";
   measuringRevision = 0;
   try {
     host.style.width = `${request.width}px`;
@@ -58,6 +81,12 @@ async function receive(value: unknown): Promise<void> {
     host.getBoundingClientRect();
     await document.fonts.ready;
     if (request.revision !== latestRevision) return;
+    // Non-overflowing inline math keeps its original text baseline. Only a
+    // formula that cannot wrap within the host needs a scrolling inline block.
+    for (const element of host.querySelectorAll<HTMLElement>(".paseo-inline-math")) {
+      if (element.getBoundingClientRect().width > request.width + 1)
+        element.classList.add("paseo-scrollable-inline-math");
+    }
     measuringRevision = request.revision;
     measure();
   } catch {

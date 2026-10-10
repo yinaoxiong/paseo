@@ -54,6 +54,15 @@ There is no escape hatch. If none of (1)–(3) fit, the problem is upstream — 
 
 ## How Updates Propagate
 
+### Native measurement refs
+
+Pass a stable callback from `createAnimatedViewRef` to a Unistyles-managed native `View`;
+keep the original animated ref for UI-thread measurement. Reanimated's ref also acts as a
+getter and returns a native wrapper. Unistyles treats a ref's return value as a cleanup
+function, so passing the getter directly throws during detach, including startup theme
+hydration. The adapter discards that handle and returns a real cleanup callback. Cover
+attach, detach and remount against the installed Unistyles cleanup implementation.
+
 For standard React Native components, the [Unistyles Babel plugin](https://www.unistyl.es/v3/other/babel-plugin) rewrites imports such as `View`, `Text`, `Pressable`, and `ScrollView` to Unistyles-aware component factories. On native, those factories borrow the component ref and register the `style` prop with the ShadowRegistry. The upstream ["Why my view doesn't update?"](https://www.unistyl.es/v3/guides/why-my-view-doesnt-update) guide describes this as the ShadowTree update path that avoids unnecessary React re-renders.
 
 The important detail: the automatic native path tracks `props.style`. It does not generally track every prop that happens to carry style-like values.

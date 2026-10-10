@@ -5,13 +5,14 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { HEADER_INNER_HEIGHT } from "@/constants/layout";
 import { resolveContentMaxWidth, useAppSettings } from "@/hooks/use-settings";
 import { KeyboardTranslateView } from "@/keyboard/shift";
-import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import { View, type LayoutChangeEvent, type ViewProps, StyleSheet } from "react-native";
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
   useDerivedValue,
   useAnimatedReaction,
+  useAnimatedRef,
   type SharedValue,
 } from "react-native-reanimated";
 import { useKeyboardShift } from "@/keyboard/shift";
@@ -20,6 +21,8 @@ import {
   updateComposerCapacity,
   type ComposerCapacity,
 } from "./internal/capacity";
+import { MobilePanelScrollViewportBoundary } from "@/mobile-panels/provider";
+import { createAnimatedViewRef } from "@/mobile-panels/native-measurement-ref";
 
 const ViewportCapacity = createContext<SharedValue<number | undefined> | null>(null);
 
@@ -36,6 +39,11 @@ function ComposerViewport({
   centered = false,
   ...props
 }: ComposerViewportProps) {
+  const gestureViewportRef = useAnimatedRef<View>();
+  const attachViewport = useMemo(
+    () => createAnimatedViewRef(gestureViewportRef),
+    [gestureViewportRef],
+  );
   const measuredHeight = useSharedValue(0);
   const sizing = useSharedValue<ComposerCapacity | undefined>(undefined);
   const { layoutShift, bottomInset: safeAreaBottom } = useKeyboardShift();
@@ -63,9 +71,17 @@ function ComposerViewport({
   );
 
   return (
-    <View testID="composer-viewport" {...props} onLayout={measureViewport} collapsable={false}>
-      <ViewportCapacity.Provider value={capacity}>{children}</ViewportCapacity.Provider>
-    </View>
+    <MobilePanelScrollViewportBoundary viewportRef={gestureViewportRef}>
+      <View
+        ref={attachViewport}
+        testID="composer-viewport"
+        {...props}
+        onLayout={measureViewport}
+        collapsable={false}
+      >
+        <ViewportCapacity.Provider value={capacity}>{children}</ViewportCapacity.Provider>
+      </View>
+    </MobilePanelScrollViewportBoundary>
   );
 }
 

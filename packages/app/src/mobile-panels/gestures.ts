@@ -7,7 +7,7 @@ import { useHorizontalScrollOptional } from "@/contexts/horizontal-scroll-contex
 import { usePanelStore } from "@/stores/panel-store";
 import { canBeginMobilePanelGesture, isMobilePanelGestureCurrent } from "./model";
 import { useMobilePanelsRuntime } from "./provider";
-import { resolveMobilePanelGestureIntent } from "./gesture-intent";
+import { captureMobilePanelOpeningTouch, resolveMobilePanelGestureIntent } from "./gesture-intent";
 
 const MOBILE_WEB_EDGE_SWIPE_WIDTH = 32;
 
@@ -20,6 +20,7 @@ function useGestureState() {
     startedRevision: useSharedValue(-1),
     touchStartX: useSharedValue(0),
     touchStartY: useSharedValue(0),
+    touchStartedInScrollRegion: useSharedValue(false),
   };
 }
 
@@ -38,6 +39,7 @@ export function useOpenAgentListGesture(enabled: boolean) {
   const {
     beginGesture,
     finishGesture,
+    isOpeningTouchInScrollRegion,
     leftOpenGestureRef,
     motionState,
     openGesturesBlocked,
@@ -46,7 +48,8 @@ export function useOpenAgentListGesture(enabled: boolean) {
     windowWidth,
   } = useMobilePanelsRuntime();
   const horizontalScroll = useHorizontalScrollOptional();
-  const { startedRevision, touchStartX, touchStartY } = useGestureState();
+  const { startedRevision, touchStartX, touchStartY, touchStartedInScrollRegion } =
+    useGestureState();
   const showMobileAgentList = usePanelStore((state) => state.showMobileAgentList);
   const commit = useRevisionCommit(showMobileAgentList);
 
@@ -56,12 +59,17 @@ export function useOpenAgentListGesture(enabled: boolean) {
         .withRef(leftOpenGestureRef)
         .enabled(enabled)
         .manualActivation(true)
-        .onTouchesDown((event) => {
-          const touch = event.changedTouches[0];
-          if (touch) {
-            touchStartX.value = touch.absoluteX;
-            touchStartY.value = touch.absoluteY;
-          }
+        .onTouchesDown((event, stateManager) => {
+          captureMobilePanelOpeningTouch({
+            numberOfTouches: event.numberOfTouches,
+            touch: event.changedTouches[0],
+            startX: touchStartX,
+            startY: touchStartY,
+            blocked: touchStartedInScrollRegion,
+            native: !isWeb,
+            hitTest: isOpeningTouchInScrollRegion,
+            stateManager,
+          });
         })
         .onTouchesMove((event, stateManager) => {
           const touch = event.changedTouches[0];
@@ -79,7 +87,7 @@ export function useOpenAgentListGesture(enabled: boolean) {
             deltaX,
             deltaY,
             direction: 1,
-            openGesturesBlocked: openGesturesBlocked.value,
+            openGesturesBlocked: openGesturesBlocked.value || touchStartedInScrollRegion.value,
           });
           if (
             !canBeginMobilePanelGesture(motionState.value, "agent", position.value) ||
@@ -116,6 +124,7 @@ export function useOpenAgentListGesture(enabled: boolean) {
       enabled,
       beginGesture,
       finishGesture,
+      isOpeningTouchInScrollRegion,
       horizontalScroll?.isAnyScrolledRight,
       leftOpenGestureRef,
       motionState,
@@ -124,6 +133,7 @@ export function useOpenAgentListGesture(enabled: boolean) {
       startedRevision,
       touchStartX,
       touchStartY,
+      touchStartedInScrollRegion,
       updateGesture,
       windowWidth,
     ],
@@ -231,6 +241,7 @@ export function useOpenFileExplorerGesture({ enabled, onOpen }: OpenFileExplorer
   const {
     beginGesture,
     finishGesture,
+    isOpeningTouchInScrollRegion,
     leftOpenGestureRef,
     motionState,
     openGesturesBlocked,
@@ -239,7 +250,8 @@ export function useOpenFileExplorerGesture({ enabled, onOpen }: OpenFileExplorer
     updateGesture,
     windowWidth,
   } = useMobilePanelsRuntime();
-  const { startedRevision, touchStartX, touchStartY } = useGestureState();
+  const { startedRevision, touchStartX, touchStartY, touchStartedInScrollRegion } =
+    useGestureState();
   const commit = useRevisionCommit(onOpen);
 
   return useMemo(
@@ -249,12 +261,17 @@ export function useOpenFileExplorerGesture({ enabled, onOpen }: OpenFileExplorer
         .simultaneousWithExternalGesture(leftOpenGestureRef)
         .enabled(enabled)
         .manualActivation(true)
-        .onTouchesDown((event) => {
-          const touch = event.changedTouches[0];
-          if (touch) {
-            touchStartX.value = touch.absoluteX;
-            touchStartY.value = touch.absoluteY;
-          }
+        .onTouchesDown((event, stateManager) => {
+          captureMobilePanelOpeningTouch({
+            numberOfTouches: event.numberOfTouches,
+            touch: event.changedTouches[0],
+            startX: touchStartX,
+            startY: touchStartY,
+            blocked: touchStartedInScrollRegion,
+            native: !isWeb,
+            hitTest: isOpeningTouchInScrollRegion,
+            stateManager,
+          });
         })
         .onTouchesMove((event, stateManager) => {
           const touch = event.changedTouches[0];
@@ -272,7 +289,7 @@ export function useOpenFileExplorerGesture({ enabled, onOpen }: OpenFileExplorer
             deltaX,
             deltaY,
             direction: -1,
-            openGesturesBlocked: openGesturesBlocked.value,
+            openGesturesBlocked: openGesturesBlocked.value || touchStartedInScrollRegion.value,
           });
           if (
             !canBeginMobilePanelGesture(motionState.value, "agent", position.value) ||
@@ -310,6 +327,7 @@ export function useOpenFileExplorerGesture({ enabled, onOpen }: OpenFileExplorer
       commit,
       enabled,
       finishGesture,
+      isOpeningTouchInScrollRegion,
       leftOpenGestureRef,
       motionState,
       openGesturesBlocked,
@@ -318,6 +336,7 @@ export function useOpenFileExplorerGesture({ enabled, onOpen }: OpenFileExplorer
       startedRevision,
       touchStartX,
       touchStartY,
+      touchStartedInScrollRegion,
       updateGesture,
       windowWidth,
     ],

@@ -1,3 +1,5 @@
+import type { MobilePanelGestureRegion } from "@/mobile-panels/gesture-regions";
+
 export interface MathRuntimeRequest {
   revision: number;
   html: string;
@@ -21,6 +23,7 @@ export type MathRuntimeMessage =
       height: number;
       fontCount: number;
       renderMs: number;
+      horizontalScrollRegions: MobilePanelGestureRegion[];
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -33,6 +36,31 @@ function isPositive(value: unknown): value is number {
 
 function isRevision(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function parseRegions(
+  value: unknown,
+  width: number,
+  height: number,
+): MobilePanelGestureRegion[] | null {
+  if (!Array.isArray(value) || value.length > 64) return null;
+  const regions: MobilePanelGestureRegion[] = [];
+  for (const region of value) {
+    if (!isRecord(region) || !isPositive(region.width) || !isPositive(region.height)) return null;
+    if (
+      typeof region.x !== "number" ||
+      !Number.isFinite(region.x) ||
+      region.x < 0 ||
+      typeof region.y !== "number" ||
+      !Number.isFinite(region.y) ||
+      region.y < 0 ||
+      region.x + region.width > width + 0.5 ||
+      region.y + region.height > height + 0.5
+    )
+      return null;
+    regions.push({ x: region.x, y: region.y, width: region.width, height: region.height });
+  }
+  return regions;
 }
 
 export function parseMathRuntimeRequest(value: unknown): MathRuntimeRequest | null {
@@ -84,6 +112,12 @@ export function parseMathRuntimeMessage(value: unknown): MathRuntimeMessage | nu
     Number.isFinite(value.renderMs) &&
     value.renderMs >= 0
   ) {
+    const horizontalScrollRegions = parseRegions(
+      value.horizontalScrollRegions,
+      value.width,
+      value.height,
+    );
+    if (!horizontalScrollRegions) return null;
     return {
       type: "size",
       revision: value.revision,
@@ -91,6 +125,7 @@ export function parseMathRuntimeMessage(value: unknown): MathRuntimeMessage | nu
       height: value.height,
       fontCount: value.fontCount,
       renderMs: value.renderMs,
+      horizontalScrollRegions,
     };
   }
   return null;

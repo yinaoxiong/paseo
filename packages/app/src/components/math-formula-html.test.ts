@@ -94,8 +94,17 @@ describe("Android math paragraph content", () => {
         height: 80,
         fontCount: 2,
         renderMs: 12,
+        horizontalScrollRegions: [],
       }),
-    ).toEqual({ type: "size", revision: 1, width: 300, height: 80, fontCount: 2, renderMs: 12 });
+    ).toEqual({
+      type: "size",
+      revision: 1,
+      width: 300,
+      height: 80,
+      fontCount: 2,
+      renderMs: 12,
+      horizontalScrollRegions: [],
+    });
     expect(
       parseMathRuntimeMessage({
         type: "size",
@@ -108,5 +117,29 @@ describe("Android math paragraph content", () => {
     ).toBeNull();
     expect(parseMathRuntimeMessage({ type: "link", revision: 1, index: -1 })).toBeNull();
     expect(parseMathRuntimeRequest({ revision: 0, html: "test", width: 300 })).toBeNull();
+  });
+
+  it("validates overflow rectangles before native gesture admission", () => {
+    const size = { type: "size", revision: 1, width: 300, height: 80, fontCount: 2, renderMs: 12 };
+    const region = { x: 0, y: 20, width: 300, height: 40 };
+    expect(parseMathRuntimeMessage({ ...size, horizontalScrollRegions: [region] })).toEqual({
+      ...size,
+      horizontalScrollRegions: [region],
+    });
+    expect(
+      parseMathRuntimeMessage({ ...size, horizontalScrollRegions: [{ ...region, x: -1 }] }),
+    ).toBeNull();
+    expect(
+      parseMathRuntimeMessage({
+        ...size,
+        horizontalScrollRegions: [{ ...region, width: Infinity }],
+      }),
+    ).toBeNull();
+    expect(
+      parseMathRuntimeMessage({ ...size, horizontalScrollRegions: [{ ...region, y: 60 }] }),
+    ).toBeNull();
+    expect(
+      parseMathRuntimeMessage({ ...size, horizontalScrollRegions: Array(65).fill(region) }),
+    ).toBeNull();
   });
 });

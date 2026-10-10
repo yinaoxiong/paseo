@@ -85,6 +85,14 @@ definition, no longer eligible to begin.
 - Keep `SidebarModelProvider` outside `MobileGestureWrapper`. The provider shares sidebar derivation
   across consumers, while Gesture Handler requires the wrapper's direct child to be a native `View`
   so its injected `collapsable={false}` reaches Android/Fabric.
+- Scrollable formula hosts register measured local regions through `useMobilePanelScrollSurface`
+  only while visible. Opening gestures hit-test against current native layout on the UI thread and
+  retain the touch-start decision for the whole sequence. Do not wait for WebView touch messages or
+  globally block panels because a formula retains a horizontal offset. Vertical chat scrolling and
+  panel-closing gestures keep their existing ownership.
+  Admission also intersects the chat viewport and stationary keyboard viewport; retained offscreen
+  rows must not block touches over the composer or header. Reject additional pointers before they
+  can replace the first touch's coordinates or ownership.
 - Mobile sidebars render through `MobilePanelOverlay`; do not duplicate overlay lifecycle or motion
   styles in sidebar components.
 - The desktop left sidebar is retained too. App chrome owns separate mounted and visible decisions:
