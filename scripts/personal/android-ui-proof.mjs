@@ -152,3 +152,64 @@ export function androidFrameBrightness(bytes, rect) {
   }
   throw new Error("Invalid brightness samples");
 }
+
+export function androidInteriorHorizontalSwipe(rect, viewport, direction) {
+  const valid = (r) =>
+    Array.isArray(r) && r.length === 4 && r.every(Number.isFinite) && r[2] > r[0] && r[3] > r[1];
+  if (!valid(rect) || !valid(viewport) || !["left", "right"].includes(direction))
+    throw new Error("Invalid horizontal swipe bounds or direction");
+  // Keep both endpoints in the central viewport: this tests app gestures, not system Back.
+  const width = viewport[2] - viewport[0];
+  const left = Math.max(rect[0], viewport[0] + width * 0.2);
+  const right = Math.min(rect[2], viewport[2] - width * 0.2);
+  const top = Math.max(rect[1], viewport[1]),
+    bottom = Math.min(rect[3], viewport[3]);
+  if (right - left < width * 0.15 || bottom <= top)
+    throw new Error("Insufficient visible interior for horizontal swipe");
+  const inset = (right - left) * 0.1;
+  const low = Math.round(left + inset),
+    high = Math.round(right - inset),
+    y = Math.round((top + bottom) / 2);
+  return direction === "left" ? [high, y, low, y] : [low, y, high, y];
+}
+function formulaMarkerRect(nodes, frame) {
+  const markers = nodes.filter(
+    (n) =>
+      n.text === "∑" &&
+      androidNodeVisible(n, nodes) &&
+      (!frame ||
+        (n.rect[0] >= frame[0] &&
+          n.rect[1] >= frame[1] &&
+          n.rect[2] <= frame[2] &&
+          n.rect[3] <= frame[3])),
+  );
+  if (markers.length !== 1) throw new Error("Missing or ambiguous visible QA long formula marker");
+  return markers[0].rect;
+}
+export function androidQaLongFormulaRect(nodes, previous) {
+  const anchor = previous ?? formulaMarkerRect(nodes);
+  const x = (anchor[0] + anchor[2]) / 2,
+    y = (anchor[1] + anchor[3]) / 2;
+  const hosts = nodes.filter(
+    (n) =>
+      hasId(n, "android-math-webview") &&
+      androidNodeVisible(n, nodes) &&
+      x >= n.rect[0] &&
+      x < n.rect[2] &&
+      y >= n.rect[1] &&
+      y < n.rect[3],
+  );
+  if (hosts.length !== 1) throw new Error("Missing or ambiguous visible QA long formula host");
+  return hosts[0].rect;
+}
+export function androidQaFormulaSwipeRect(nodes, frame) {
+  const marker = formulaMarkerRect(nodes, frame);
+  return [frame[0], marker[1], frame[2], marker[3]];
+}
+
+export function assertAndroidThemeSample(value, theme) {
+  if (!Number.isFinite(value) || value < 0 || value > 255 || !["dark", "light"].includes(theme))
+    throw new Error("Invalid Android theme sample");
+  if (theme === "dark" ? value >= 128 : value <= 128)
+    throw new Error(`Android theme has not reached ${theme}: median ${value}`);
+}

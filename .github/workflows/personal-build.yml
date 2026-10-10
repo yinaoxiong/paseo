@@ -17,9 +17,9 @@ on:
         type: string
         required: true
       build_scope:
-        description: Build everything, verify online CLI installation, or build only the Android APK.
+        description: Build packages, verify online CLI, build Android, or reverify an existing QA APK without compilation.
         type: choice
-        options: [all, online-verify, android-only]
+        options: [all, online-verify, android-only, android-qa-verify]
         default: all
         required: true
       npm_candidate_run_id:
@@ -38,6 +38,14 @@ on:
         description: Independently accepted SHA-256 of that existing Mac archive.
         type: string
         default: ""
+      android_qa_run_id:
+        description: Completed Personal Build with a successful QA APK compilation job; overall Run may have failed native testing.
+        type: string
+        default: ""
+      android_qa_manifest_sha256:
+        description: Independently accepted SHA-256 of that Run's exact qa-build.json; use android-qa-verify only.
+        type: string
+        default: ""
 permissions:
   contents: read
 concurrency:
@@ -53,11 +61,14 @@ jobs:
     if: >-
       github.repository == 'yinaoxiong/paseo' && github.event_name == 'workflow_dispatch' &&
       (github.ref == 'refs/heads/personal/stable' ||
-      (github.ref == 'refs/heads/integration/android-latex' && inputs.build_scope == 'android-only'))
+      (github.ref == 'refs/heads/integration/android-latex' && (inputs.build_scope == 'android-only' || inputs.build_scope == 'android-qa-verify')))
     runs-on: ubuntu-24.04
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       revision: ${{ steps.resolve.outputs.revision }}
+      qa_payload_sha: ${{ steps.android_qa.outputs.qa_payload_sha }}
+      qa_run_attempt: ${{ steps.android_qa.outputs.qa_run_attempt }}
+      qa_artifact_id: ${{ steps.android_qa.outputs.qa_artifact_id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -81,8 +92,21 @@ jobs:
           PASEO_NPM_CANDIDATE_MANIFEST_SHA256: ${{ inputs.npm_candidate_manifest_sha256 }}
           PASEO_MAC_ARCHIVE_RUN_ID: ${{ inputs.mac_archive_run_id }}
         run: node scripts/personal/resolve-npm-candidate.mjs
+      - name: Admit an existing Android QA APK when requested
+        id: android_qa
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PASEO_SOURCE_SHA: ${{ steps.resolve.outputs.sha }}
+          PASEO_BUILD_SCOPE: ${{ inputs.build_scope }}
+          PASEO_ANDROID_QA_RUN_ID: ${{ inputs.android_qa_run_id }}
+          PASEO_ANDROID_QA_MANIFEST_SHA256: ${{ inputs.android_qa_manifest_sha256 }}
+          PASEO_NPM_CANDIDATE_RUN_ID: ${{ inputs.npm_candidate_run_id }}
+          PASEO_MAC_ARCHIVE_RUN_ID: ${{ inputs.mac_archive_run_id }}
+          PASEO_NPM_CANDIDATE_MANIFEST_SHA256: ${{ inputs.npm_candidate_manifest_sha256 }}
+          PASEO_MAC_ARCHIVE_SHA256: ${{ inputs.mac_archive_sha256 }}
+        run: node scripts/personal/resolve-android-qa-candidate.mjs
   cli:
-    if: inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'android-only'
+    if: inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'android-only' && inputs.build_scope != 'android-qa-verify'
     needs: resolve
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -116,7 +140,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-    if: ${{ !cancelled() && inputs.build_scope != 'android-only' && inputs.mac_archive_run_id == '' && needs.resolve.result == 'success' && (needs.cli.result == 'success' || inputs.npm_candidate_run_id != '') }}
+    if: ${{ !cancelled() && inputs.build_scope != 'android-only' && inputs.build_scope != 'android-qa-verify' && inputs.mac_archive_run_id == '' && needs.resolve.result == 'success' && (needs.cli.result == 'success' || inputs.npm_candidate_run_id != '') }}
     needs: [resolve, cli]
     env:
       PASEO_NPM_CANDIDATE_RUN_ID: ${{ inputs.npm_candidate_run_id }}
@@ -203,7 +227,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   android-qa-build:
-    if: inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'online-verify'
+    if: inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'online-verify' && inputs.build_scope != 'android-qa-verify'
     needs: resolve
     runs-on: ubuntu-24.04
     timeout-minutes: 75
@@ -245,16 +269,22 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   android-qa:
-    if: inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'online-verify'
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'online-verify' && (needs['android-qa-build'].result == 'success' || inputs.build_scope == 'android-qa-verify') }}
     needs: [resolve, android-qa-build]
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     permissions:
       contents: read
+      actions: read
+    env:
+      PASEO_BUILD_SCOPE: ${{ inputs.build_scope }}
+      PASEO_ANDROID_QA_RUN_ID: ${{ inputs.android_qa_run_id }}
+      PASEO_ANDROID_QA_MANIFEST_SHA256: ${{ inputs.android_qa_manifest_sha256 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -262,7 +292,9 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: personal-android-qa-x86_64
-          path: ${{ runner.temp }}/android-qa
+          path: .dev/android-qa-input
+          run-id: ${{ inputs.android_qa_run_id || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Prepare isolated fixture container
         env:
           PASEO_ANDROID_QA: "true"
@@ -274,8 +306,16 @@ jobs:
           path: ${{ runner.temp }}/paseo-npm-cache
           key: personal-npm-linux-x64-node24.21.0-npm11.19.0-${{ hashFiles('package-lock.json') }}
       - name: Start native QA fixture
+        env:
+          PASEO_BUILD_SCOPE: ${{ inputs.build_scope }}
+          PASEO_PERSONAL_REVISION: ${{ needs.resolve.outputs.revision }}
+          PASEO_ANDROID_QA_PAYLOAD_SHA: ${{ needs.resolve.outputs.qa_payload_sha }}
+          PASEO_ANDROID_QA_RUN_ID: ${{ inputs.android_qa_run_id }}
+          PASEO_ANDROID_QA_RUN_ATTEMPT: ${{ needs.resolve.outputs.qa_run_attempt }}
+          PASEO_ANDROID_QA_MANIFEST_SHA256: ${{ inputs.android_qa_manifest_sha256 }}
         run: |
           devcontainer up --workspace-folder "$GITHUB_WORKSPACE" --override-config "$RUNNER_TEMP/paseo-personal-ci-devcontainer.json" --mount-git-worktree-common-dir true
+          devcontainer exec --workspace-folder "$GITHUB_WORKSPACE" --override-config "$RUNNER_TEMP/paseo-personal-ci-devcontainer.json" --mount-git-worktree-common-dir true --remote-env "PASEO_BUILD_SCOPE=$PASEO_BUILD_SCOPE" --remote-env "PASEO_PERSONAL_REVISION=$PASEO_PERSONAL_REVISION" --remote-env "PASEO_ANDROID_QA_PAYLOAD_SHA=$PASEO_ANDROID_QA_PAYLOAD_SHA" --remote-env "PASEO_ANDROID_QA_RUN_ID=$PASEO_ANDROID_QA_RUN_ID" --remote-env "PASEO_ANDROID_QA_RUN_ATTEMPT=$PASEO_ANDROID_QA_RUN_ATTEMPT" --remote-env "PASEO_ANDROID_QA_MANIFEST_SHA256=$PASEO_ANDROID_QA_MANIFEST_SHA256" node scripts/personal/verify-android-qa-input.mjs .dev/android-qa-input .dev/android-qa-input/qa-verification-input.json
           devcontainer exec --workspace-folder "$GITHUB_WORKSPACE" --override-config "$RUNNER_TEMP/paseo-personal-ci-devcontainer.json" --mount-git-worktree-common-dir true sh -lc 'set -e; npm run build:server; cd packages/app; nohup node --import tsx e2e/mobile/android-release/fixture.ts > /tmp/paseo-qa-state/fixture.log 2>&1 < /dev/null & echo $! > /tmp/paseo-qa-state/fixture.pid'
           for attempt in $(seq 1 90); do
             if [ -f "$RUNNER_TEMP/paseo-qa-state/fixture-ready.json" ]; then break; fi
@@ -302,7 +342,7 @@ jobs:
           profile: pixel_7
           disable-animations: false
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: node scripts/personal/smoke-android-release.mjs "$RUNNER_TEMP/android-qa" "$RUNNER_TEMP/paseo-qa-state" "$RUNNER_TEMP/android-qa-results"
+          script: node scripts/personal/smoke-android-release.mjs .dev/android-qa-input "$RUNNER_TEMP/paseo-qa-state" "$RUNNER_TEMP/android-qa-results"
       - name: Stop isolated fixture
         if: always()
         run: |

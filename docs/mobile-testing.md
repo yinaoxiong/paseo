@@ -7,12 +7,33 @@ The native smoke uses an isolated fixture daemon and existing mobile selectors. 
 UI, rejects the root error page, forces chat/theme/background lifecycle transitions and checks
 scrolling/panels. Select the fixture workspace through the visible sidebar before chat links;
 native directory subscriptions are demand-driven, and a cold workspace URL does not hydrate them.
+Select the long formula by its fixture summation marker, not the last WebView: native list order
+can put short inline math after the block. Drag along the visible formula glyph row, using interior
+viewport coordinates for formula and panel swipes. Edge-origin adb swipes can invoke Android
+system Back and return home instead of testing the app. Keep system navigation unchanged; retain
+the coordinates in the runtime proof.
+Use a wide fraction numerator in the fixture; a string of outer plus operators can wrap instead
+of overflowing. Verify the fixture in the offline HTML runtime before a native retry. Appearance
+checks wait for observed dark/light brightness inside the existing bounded UI wait; a stable
+WebView ID or fixed sleep does not establish theme completion.
 Failure retains screenshots, hierarchy and logcat. The ARM64 signing job depends
 on this gate; no production signing Secret enters QA.
 
 QA and delivery are different files. QA proves the same source runs through the native stack;
 it does not prove installation of the ARM64 delivery file or Redmi-specific behavior. Keep phone
 acceptance explicit. No real model inference is used by the fixture.
+
+For test-flow or fixture-only changes, dispatch Personal Build with `android-qa-verify`, the
+producer's Run ID, the SHA-256 of its accepted `qa-build.json`, and the same personal revision.
+The producer must have finished a successful QA compilation job; an overall failed Run is valid
+input when you are investigating its native failure. The mode downloads that exact APK and skips
+APK compilation, deliverable packaging and signing. Fixture startup still builds the server stack. App/native/dependency or QA build-definition changes require
+a new APK. The input guard checks source trees and the original build definition before adb runs.
+
+Keep producer and verifier provenance separate: `payloadSourceSha` identifies the APK code;
+`verifierSourceSha` identifies the current test driver. `qa-runtime.json` retains both Runs,
+input hashes, partial assertions, failure and cleanup results. A failed app or emulator test remains
+a failure; APK reuse does not establish phone acceptance. Local emulator/device setup is separate.
 
 ## Agent Device
 

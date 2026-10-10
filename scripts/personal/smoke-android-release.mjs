@@ -1,8 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { repoRoot } from "./build-info.mjs";
+import {
+  androidQaVerifyScope,
+  verifyAndroidQaArtifact,
+  assertAndroidQaBinding,
+} from "./android-qa-reverification.mjs";
 import {
   assertHealthyAndroidUi,
   visibleAndroidRect,
@@ -13,31 +17,51 @@ import {
   assertAndroidDestination,
   androidNodeVisible,
   androidCaptureOptions,
+  androidInteriorHorizontalSwipe,
+  assertAndroidThemeSample,
+  androidQaLongFormulaRect,
+  androidQaFormulaSwipeRect,
   androidQaWorkspaceRowId,
   assertAndroidWorkspaceSelected,
 } from "./android-ui-proof.mjs";
 
 const [apkDir, stateDir, outDir] = process.argv.slice(2).map((p) => path.resolve(p));
 mkdirSync(outDir, { recursive: true });
-const manifest = JSON.parse(readFileSync(path.join(apkDir, "qa-build.json"), "utf8"));
+const binding = JSON.parse(readFileSync(path.join(apkDir, "qa-verification-input.json"), "utf8"));
 const fixture = JSON.parse(readFileSync(path.join(stateDir, "fixture-ready.json"), "utf8"));
 const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
-const apk = path.join(apkDir, manifest.apk);
 if (
-  manifest.sourceSha !== sha ||
-  manifest.kind !== "emulator-qa-only" ||
-  manifest.abi !== "x86_64" ||
-  manifest.buildType !== "release" ||
-  !manifest.hermes ||
-  manifest.productionSigner !== false ||
-  createHash("sha256").update(readFileSync(apk)).digest("hex") !== manifest.apkSha256
+  execFileSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  }).trim()
 )
-  throw new Error("QA source/artifact identity mismatch");
+  throw new Error("Verifier working tree changed after input admission");
+const reuse = process.env.PASEO_BUILD_SCOPE === androidQaVerifyScope;
+if (
+  binding.mode !== (reuse ? "exact-apk-reverification" : "current-build-verification") ||
+  binding.verificationRunId !== (process.env.GITHUB_RUN_ID ?? null) ||
+  (reuse &&
+    (binding.producerRunId !== process.env.PASEO_ANDROID_QA_RUN_ID ||
+      binding.manifestSha256 !== process.env.PASEO_ANDROID_QA_MANIFEST_SHA256)) ||
+  (!reuse && binding.payloadSourceSha !== sha)
+)
+  throw new Error("Unexpected QA input mode/Run binding");
+const artifact = verifyAndroidQaArtifact(apkDir, {
+  payloadSha: binding.payloadSourceSha,
+  manifestHash: binding.manifestSha256,
+  runId: binding.producerRunId,
+  runAttempt: binding.producerRunAttempt,
+});
+assertAndroidQaBinding(binding, artifact, sha);
+const manifest = artifact.manifest;
+const apk = path.join(apkDir, manifest.apk);
 if (!Number.isInteger(fixture.port) || fixture.port < 1024 || [6767, 6768].includes(fixture.port))
   throw new Error("Refusing non-isolated daemon port");
 const adb = (...args) =>
   execFileSync("adb", args, { ...androidCaptureOptions, encoding: "utf8", timeout: 30000 });
 const assertions = [];
+const horizontalInputs = [];
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const snapshot = (name) => {
   adb("shell", "uiautomator", "dump", "/sdcard/paseo-qa.xml");
@@ -57,7 +81,16 @@ async function expectUi(name, id, options = {}) {
       const nodes = assertHealthyAndroidUi(xml, id);
       assertAndroidDestination(nodes, options);
       if (options.workspace) assertAndroidWorkspaceSelected(nodes, options.workspace);
-      assertions.push({ name, expectedId: id, passed: true });
+      const observed = { name, expectedId: id, passed: true };
+      if (options.theme) {
+        observed.brightness = androidFrameBrightness(
+          rawScreen(),
+          visibleAndroidRect(nodes, "composer-viewport"),
+        );
+        assertAndroidThemeSample(observed.brightness, options.theme);
+        observed.theme = options.theme;
+      }
+      assertions.push(observed);
       return nodes;
     } catch (e) {
       error = e;
@@ -101,14 +134,22 @@ const tapRect = (rect) =>
   );
 function assertPanelsClosed(nodes, frame) {
   assertAndroidPanelsClosed(nodes);
-  assertAndroidFormulaFrameStable(frame, visibleAndroidRect(nodes, "android-math-webview"));
+  assertAndroidFormulaFrameStable(frame, androidQaLongFormulaRect(nodes, frame));
 }
+function horizontalSwipe(name, rect, nodes, direction) {
+  const points = androidInteriorHorizontalSwipe(rect, nodes[0]?.rect, direction);
+  horizontalInputs.push({ name, contentBounds: rect, viewport: nodes[0].rect, direction, points });
+  swipe(...points);
+}
+let smokeError;
+let installedVersionCode = null;
 try {
   adb("logcat", "-c");
   adb("install", "-r", apk);
   const installed = adb("shell", "dumpsys", "package", "sh.paseo.personal");
   if (!installed.includes(`versionCode=${manifest.androidVersionCode}`))
     throw new Error("Installed QA version mismatch");
+  installedVersionCode = manifest.androidVersionCode;
   writeFileSync(path.join(outDir, "installed-package.txt"), installed);
   adb("reverse", `tcp:${fixture.port}`, `tcp:${fixture.port}`);
   execFileSync(
@@ -150,26 +191,18 @@ try {
   open(fixture.routes.math);
   nodes = await expectUi("foreground-return", "android-math-webview", { text: "Math QA marker." });
   adb("shell", "cmd", "uimode", "night", "yes");
-  await pause(1500);
-  nodes = await expectUi("dark-theme", "android-math-webview");
-  const darkBrightness = androidFrameBrightness(
-    rawScreen(),
-    visibleAndroidRect(nodes, "composer-viewport"),
-  );
+  nodes = await expectUi("dark-theme", "android-math-webview", { theme: "dark" });
+  const darkBrightness = assertions.at(-1).brightness;
   adb("shell", "cmd", "uimode", "night", "no");
-  await pause(1500);
-  nodes = await expectUi("light-theme", "android-math-webview");
-  const lightBrightness = androidFrameBrightness(
-    rawScreen(),
-    visibleAndroidRect(nodes, "composer-viewport"),
-  );
+  nodes = await expectUi("light-theme", "android-math-webview", { theme: "light" });
+  const lightBrightness = assertions.at(-1).brightness;
   if (darkBrightness >= 128 || lightBrightness <= 128 || lightBrightness - darkBrightness < 60)
     throw new Error("App did not visibly change between dark and light themes");
   assertions.push({ name: "observed-theme-change", darkBrightness, lightBrightness, passed: true });
-  const [left, top, right, bottom] = visibleAndroidRect(nodes, "android-math-webview");
-  const y = (top + bottom) / 2;
+  const [left, top, right, bottom] = androidQaLongFormulaRect(nodes);
+  const formulaSwipeRect = androidQaFormulaSwipeRect(nodes, [left, top, right, bottom]);
   const before = rawScreen();
-  swipe(right - 15, y, left + 15, y);
+  horizontalSwipe("formula-swipe-left", formulaSwipeRect, nodes, "left");
   await pause(500);
   assertPanelsClosed(await expectUi("formula-swipe-left", "android-math-webview"), [
     left,
@@ -180,7 +213,7 @@ try {
   if (!androidFrameChanged(before, rawScreen(), [left, top, right, bottom]))
     throw new Error("Long formula did not actually scroll");
   assertions.push({ name: "formula-content-moved", passed: true });
-  swipe(left + 15, y, right - 15, y);
+  horizontalSwipe("formula-swipe-right", formulaSwipeRect, nodes, "right");
   assertPanelsClosed(await expectUi("formula-swipe-right", "android-math-webview"), [
     left,
     top,
@@ -189,7 +222,7 @@ try {
   ]);
   // Continuing at the right/left limits must not hand this touch sequence to a panel.
   for (let edge = 0; edge < 3; edge++) {
-    swipe(left + 15, y, right - 15, y);
+    horizontalSwipe(`formula-left-edge-${edge}`, formulaSwipeRect, nodes, "right");
     assertPanelsClosed(await expectUi(`formula-left-edge-${edge}`, "android-math-webview"), [
       left,
       top,
@@ -219,32 +252,57 @@ try {
   );
   if (!prose) throw new Error("No visible ordinary prose for panel swipe");
   const py = (prose.rect[1] + prose.rect[3]) / 2;
-  swipe(cl + 35, py, cr - 35, py);
+  horizontalSwipe("left-panel-open", [cl, py - 1, cr, py + 1], nodes, "right");
   nodes = await expectUi("left-panel-open", "sidebar-close");
   tapRect(visibleAndroidRect(nodes, "sidebar-close"));
   nodes = await expectUi("left-panel-return", "message-input-root");
-  swipe(cr - 35, py, cl + 35, py);
+  horizontalSwipe("right-panel-open", [cl, py - 1, cr, py + 1], nodes, "left");
   nodes = await expectUi("right-panel-open", "explorer-tab-files");
   tapRect(visibleAndroidRect(nodes, "explorer-close"));
   await expectUi("right-panel-return", "message-input-root");
+} catch (error) {
+  smokeError = error;
+} finally {
+  const cleanup = [];
+  for (const [name, action] of [
+    [
+      "logcat",
+      () => writeFileSync(path.join(outDir, "logcat.txt"), adb("logcat", "-d", "-v", "threadtime")),
+    ],
+    ["app-stop", () => adb("shell", "am", "force-stop", "sh.paseo.personal")],
+    ["reverse-remove", () => adb("reverse", "--remove", `tcp:${fixture.port}`)],
+  ]) {
+    try {
+      action();
+      cleanup.push({ name, passed: true });
+    } catch (error) {
+      cleanup.push({ name, passed: false, error: error.message });
+      smokeError ??= error;
+    }
+  }
   writeFileSync(
     path.join(outDir, "qa-runtime.json"),
     JSON.stringify(
       {
-        sourceSha: sha,
+        ...binding,
+        sourceSha: manifest.sourceSha,
+        verifierSourceSha: sha,
         qaApkSha256: manifest.apkSha256,
         qaAbi: "x86_64",
         deliveryArm64RuntimeTest: false,
+        runtimeOutcome: smokeError ? "failed" : "passed",
+        error: smokeError
+          ? { name: smokeError.name, message: smokeError.message.slice(0, 1000) }
+          : null,
         assertions,
-        installedVersionCode: manifest.androidVersionCode,
+        horizontalInputs,
+        cleanup,
+        installedVersionCode,
         fixturePort: fixture.port,
       },
       null,
       2,
     ) + "\n",
   );
-} finally {
-  writeFileSync(path.join(outDir, "logcat.txt"), adb("logcat", "-d", "-v", "threadtime"));
-  adb("shell", "am", "force-stop", "sh.paseo.personal");
-  adb("reverse", "--remove", `tcp:${fixture.port}`);
 }
+if (smokeError) throw smokeError;

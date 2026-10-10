@@ -25,11 +25,12 @@ function fixtureReply(params) {
   if (process.env.PASEO_ANDROID_MATH_QA !== "1") return "Ready to work on this project.";
   if (JSON.stringify(params.input).includes("plain"))
     return "Plain QA ready. No formula in this reply.";
+  const numerator = Array.from({ length: 24 }, (_, i) => `a_{${i + 1}}`).join("+");
   return [
     "Math QA ready.",
     ...Array.from({ length: 24 }, (_, i) => `Earlier QA line ${i + 1}.`),
     "Short formula $x^2$ inside prose.",
-    "$$\\sum_{k=1}^{100}\\frac{a_k+b_k+c_k+d_k+e_k+f_k+g_k+h_k+i_k+j_k}{1+k^2}=A+B+C+D+E+F+G+H+I+J+K+L+M+N$$",
+    `$$\\sum_{k=1}^{100}\\frac{${numerator}}{1+k^2}=A+B+C+D+E+F+G+H+I+J+K+L+M+N$$`,
     ...Array.from({ length: 3 }, (_, i) => `Scroll QA line ${i + 1}.`),
     "Math QA marker.",
   ].join("\n\n");

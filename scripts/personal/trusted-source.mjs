@@ -12,7 +12,8 @@ export function resolvePersonalBuildBranch(context, cwd = root) {
   if (eventName !== "workflow_dispatch") throw new Error("Personal builds require manual dispatch");
   if (ref === "refs/heads/personal/stable") return "personal/stable";
   if (ref !== "refs/heads/integration/android-latex") throw new Error("Unapproved build branch");
-  if (buildScope !== "android-only") throw new Error("Candidate branch allows Android-only builds");
+  if (!["android-only", "android-qa-verify"].includes(buildScope))
+    throw new Error("Candidate branch allows Android-only builds or secret-free QA reverification");
   if (sourceSha !== workflowSha) throw new Error("Candidate must build its exact workflow commit");
   assertTrustedPersonalSource(sourceSha, cwd);
   // This candidate belongs to one reviewed prototype, not arbitrary future feature branches.

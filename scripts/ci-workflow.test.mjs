@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, readdirSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -43,6 +43,15 @@ import {
 
 import { androidBuildScript } from "./personal/android-build-script.mjs";
 import {
+  androidQaRequest,
+  admitAndroidQaRun,
+  androidRuntimeTreeHash,
+  androidBuildContractHash,
+  verifyAndroidQaArtifact,
+  assertAndroidQaBinding,
+  sha256 as hashQaBytes,
+} from "./personal/android-qa-reverification.mjs";
+import {
   assertHealthyAndroidUi,
   androidFrameChanged,
   androidUiNodes,
@@ -51,10 +60,268 @@ import {
   assertAndroidDestination,
   androidFrameBrightness,
   androidCaptureOptions,
+  androidInteriorHorizontalSwipe,
+  assertAndroidThemeSample,
+  androidQaLongFormulaRect,
+  androidQaFormulaSwipeRect,
   androidQaWorkspaceRowId,
   assertAndroidWorkspaceSelected,
 } from "./personal/android-ui-proof.mjs";
 const repoRoot = new URL("../", import.meta.url);
+test("Android APK reverification requires exclusive exact producer inputs", () => {
+  assert.equal(androidQaRequest({ scope: "all" }), null);
+  const input = { scope: "android-qa-verify", runId: "42", manifestHash: "a".repeat(64) };
+  assert.deepEqual(androidQaRequest(input), { runId: "42", manifestHash: "a".repeat(64) });
+  for (const patch of [
+    { scope: "android-only" },
+    { runId: "" },
+    { manifestHash: "x" },
+    { npmRunId: "9" },
+    { macRunId: "8" },
+  ])
+    assert.throws(() => androidQaRequest({ ...input, ...patch }), /exclusive scope/);
+});
+test("QA producer admission requires its completed compilation, not overall native success", () => {
+  const source = "a".repeat(40);
+  const run = {
+    id: 42,
+    run_attempt: 1,
+    repository: { full_name: "yinaoxiong/paseo" },
+    workflow_id: 377643758,
+    path: ".github/workflows/personal-build.yml",
+    event: "workflow_dispatch",
+    head_branch: "integration/android-latex",
+    head_sha: source,
+    status: "completed",
+    conclusion: "failure",
+  };
+  const job = {
+    name: "android-qa-build",
+    run_id: 42,
+    head_sha: source,
+    status: "completed",
+    conclusion: "success",
+  };
+  const artifact = {
+    id: 99,
+    name: "personal-android-qa-x86_64",
+    expired: false,
+    digest: "sha256:" + "b".repeat(64),
+    workflow_run: { id: 42, head_sha: source, head_branch: run.head_branch },
+  };
+  assert.equal(admitAndroidQaRun(run, [job], [artifact]).sourceSha, source);
+  for (const patch of [
+    { event: "pull_request" },
+    { head_branch: "pr/foreign" },
+    { status: "in_progress" },
+    { workflow_id: 2 },
+    { repository: { full_name: "getpaseo/paseo" } },
+  ])
+    assert.throws(() => admitAndroidQaRun({ ...run, ...patch }, [job], [artifact]), /producer Run/);
+  for (const patch of [
+    { conclusion: "failure" },
+    { status: "in_progress" },
+    { head_sha: "c".repeat(40) },
+    { run_id: 7 },
+  ])
+    assert.throws(() => admitAndroidQaRun(run, [{ ...job, ...patch }], [artifact]), /build job/);
+  assert.throws(() => admitAndroidQaRun(run, [job], [artifact, artifact]), /ambiguous/);
+  for (const patch of [
+    { expired: true },
+    { digest: null },
+    { workflow_run: { ...artifact.workflow_run, head_sha: "c".repeat(40) } },
+  ])
+    assert.throws(() => admitAndroidQaRun(run, [job], [{ ...artifact, ...patch }]), /artifact/);
+});
+test("QA build contract ignores only job admission while retaining actual compilation inputs", () => {
+  const original = {
+    env: { FLAG: "1" },
+    jobs: { "android-qa-build": { if: "old", runs_on: "linux", steps: [{ run: "compile" }] } },
+  };
+  const revised = structuredClone(original);
+  revised.jobs["android-qa-build"].if = "new QA-only exclusion";
+  assert.equal(androidBuildContractHash(original), androidBuildContractHash(revised));
+  revised.jobs["android-qa-build"].steps[0].run = "different compile";
+  assert.notEqual(androidBuildContractHash(original), androidBuildContractHash(revised));
+  revised.jobs["android-qa-build"].steps[0].run = "compile";
+  revised.env.FLAG = "2";
+  assert.notEqual(androidBuildContractHash(original), androidBuildContractHash(revised));
+});
+test("Exact QA artifact reuse detects app/dependency edits and keeps payload and verifier distinct", () => {
+  const temp = mkdtempSync(joinPath(os.tmpdir(), "paseo-qa-input-test-"));
+  const cwd = joinPath(temp, "source"),
+    directory = joinPath(temp, "artifact");
+  mkdirSync(cwd);
+  mkdirSync(directory);
+  const git = (...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  const put = (file, body) => {
+    mkdirSync(joinPath(cwd, file, ".."), { recursive: true });
+    writeFileSync(joinPath(cwd, file), body);
+  };
+  const commit = () => {
+    git("add", ".");
+    git(
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "user.name=QA",
+      "-c",
+      "user.email=qa@example.invalid",
+      "commit",
+      "-qm",
+      "fixture",
+    );
+    return git("rev-parse", "HEAD");
+  };
+  try {
+    git("init", "-q");
+    put("package.json", '{"version":"0.11.2"}');
+    put("package-lock.json", "{}");
+    put("packages/app/src/example.ts", "old app");
+    put("scripts/personal/smoke-android-release.mjs", "old verifier");
+    const payloadSha = commit(),
+      fingerprint = androidRuntimeTreeHash(payloadSha, cwd);
+    put("scripts/personal/smoke-android-release.mjs", "new verifier");
+    const verifierSha = commit();
+    assert.notEqual(payloadSha, verifierSha);
+    assert.equal(fingerprint, androidRuntimeTreeHash(verifierSha, cwd));
+    const apk = Buffer.from("QA");
+    const meta = {
+      schemaVersion: 1,
+      sourceSha: payloadSha,
+      kind: "emulator-qa-only",
+      abi: "x86_64",
+      buildType: "release",
+      hermes: true,
+      productionSigner: false,
+      signature: "qa-debug-key",
+      signerSha256: "d".repeat(64),
+      upstreamVersion: "0.11.2",
+      revision: 4,
+      version: "0.11.2+personal.4",
+      appVersion: "0.11.2",
+      androidVersionCode: 11002004,
+      githubRunId: "42",
+      githubRunAttempt: "1",
+      lockSha256: hashQaBytes(Buffer.from("{}")),
+      apk: "paseo-qa-0.11.2+personal.4-android-x86_64.apk",
+      apkBytes: 2,
+      apkSha256: hashQaBytes(apk),
+    };
+    const metadata = Buffer.from(JSON.stringify(meta));
+    writeFileSync(joinPath(directory, "qa-build.json"), metadata);
+    writeFileSync(joinPath(directory, meta.apk), apk);
+    const context = {
+      cwd,
+      payloadSha,
+      revision: 4,
+      runId: "42",
+      runAttempt: "1",
+      manifestHash: hashQaBytes(metadata),
+    };
+    const artifact = verifyAndroidQaArtifact(directory, context);
+    const binding = {
+      schemaVersion: 1,
+      payloadSourceSha: payloadSha,
+      verifierSourceSha: verifierSha,
+      manifestSha256: artifact.manifestHash,
+      apkSha256: meta.apkSha256,
+      runtimeInputSha256: fingerprint,
+      buildContractSha256: "e".repeat(64),
+    };
+    assert.doesNotThrow(() => assertAndroidQaBinding(binding, artifact, verifierSha, cwd));
+    assert.throws(
+      () => verifyAndroidQaArtifact(directory, { ...context, manifestHash: "f".repeat(64) }),
+      /manifest hash/,
+    );
+    assert.throws(
+      () => verifyAndroidQaArtifact(directory, { ...context, runId: "43" }),
+      /producer Run/,
+    );
+    assert.throws(
+      () => verifyAndroidQaArtifact(directory, { ...context, revision: 5 }),
+      /version mismatch/,
+    );
+    writeFileSync(joinPath(directory, meta.apk), "bad");
+    assert.throws(() => verifyAndroidQaArtifact(directory, context), /APK bytes/);
+    writeFileSync(joinPath(directory, meta.apk), apk);
+    put("packages/app/src/example.ts", "changed app");
+    const newApp = commit();
+    assert.throws(
+      () =>
+        assertAndroidQaBinding({ ...binding, verifierSourceSha: newApp }, artifact, newApp, cwd),
+      /inputs changed/,
+    );
+    put("packages/app/src/example.ts", "old app");
+    put("package-lock.json", '{"changed":true}');
+    const newLock = commit();
+    assert.notEqual(androidRuntimeTreeHash(newLock, cwd), fingerprint);
+    assert.throws(() => verifyAndroidQaArtifact(directory, context), /lock mismatch/);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+test("QA-only workflow never builds or signs and preflights explicit container inputs", () => {
+  const w = loadYaml(
+    readFileSync(new URL("../.github/workflows/personal-build.yml", import.meta.url), "utf8"),
+  );
+  assert.ok(w.on.workflow_dispatch.inputs.build_scope.options.includes("android-qa-verify"));
+  for (const name of ["cli", "npm-install", "android-qa-build"])
+    assert.match(w.jobs[name].if, /build_scope != 'android-qa-verify'/);
+  for (const name of ["desktop", "android"])
+    assert.doesNotMatch(w.jobs[name].if, /android-qa-verify/);
+  const qa = w.jobs["android-qa"];
+  assert.match(qa.if, /needs.resolve.result == 'success'/);
+  assert.match(qa.if, /build_scope == 'android-qa-verify'/);
+  assert.doesNotMatch(JSON.stringify(qa), /secrets\.|android:builder:image|build-android-qa/);
+  const download = qa.steps.find((s) => s.uses?.startsWith("actions/download-artifact@"));
+  assert.match(download.with["run-id"], /android_qa_run_id/);
+  const start = qa.steps.find((s) => s.name === "Start native QA fixture");
+  assert.match(start.run, /--remote-env "PASEO_ANDROID_QA_PAYLOAD_SHA=/);
+  assert.ok(
+    start.run.indexOf("verify-android-qa-input.mjs") < start.run.indexOf("npm run build:server"),
+  );
+});
+test("fresh QA checkout remains clean after downloading inputs and writing its binding", () => {
+  const workflow = loadYaml(
+    readFileSync(new URL("../.github/workflows/personal-build.yml", import.meta.url), "utf8"),
+  );
+  const download = workflow.jobs["android-qa"].steps.find((s) =>
+    s.uses?.startsWith("actions/download-artifact@"),
+  );
+  const temp = mkdtempSync(joinPath(os.tmpdir(), "paseo-fresh-qa-checkout-"));
+  const git = (...args) =>
+    execFileSync("git", ["-c", "core.excludesFile=/dev/null", ...args], {
+      cwd: temp,
+      encoding: "utf8",
+    }).trim();
+  try {
+    git("init", "-q");
+    writeFileSync(
+      joinPath(temp, ".gitignore"),
+      execFileSync("git", ["show", "HEAD:.gitignore"], { encoding: "utf8" }),
+    );
+    git("add", ".gitignore");
+    git(
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "user.name=QA",
+      "-c",
+      "user.email=qa@example.invalid",
+      "commit",
+      "-qm",
+      "fixture",
+    );
+    const input = joinPath(temp, download.with.path);
+    mkdirSync(input, { recursive: true });
+    for (const name of ["qa-build.json", "qa-verification-input.json", "paseo-qa.apk"])
+      writeFileSync(joinPath(input, name), "QA fixture");
+    assert.equal(git("status", "--porcelain=v1", "--untracked-files=all"), "");
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
 test("native QA rejects error pages and absent normal UI despite a surviving process", () => {
   const healthy =
     '<hierarchy><node resource-id="message-input-root" text="" bounds="[0,0][100,100]" /></hierarchy>';
@@ -236,6 +503,10 @@ test("signed Android preview admits only its exact named candidate and frozen li
     workflowSha: head,
   };
   assert.equal(resolvePersonalBuildBranch(candidate), "integration/android-latex");
+  assert.equal(
+    resolvePersonalBuildBranch({ ...candidate, buildScope: "android-qa-verify" }),
+    "integration/android-latex",
+  );
   assert.equal(
     resolvePersonalBuildBranch({
       ...candidate,
@@ -681,7 +952,7 @@ test("personal CI builds are manual, source pinned and least privileged", () => 
   ]);
   assert.equal(
     build.jobs.cli.if,
-    "inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'android-only'",
+    "inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'android-only' && inputs.build_scope != 'android-qa-verify'",
   );
   assert.match(build.jobs["npm-install"].if, /!cancelled\(\).*needs\.cli\.result/);
   assert.deepEqual(build.jobs["npm-install"].permissions, { contents: "read", actions: "read" });
@@ -697,6 +968,7 @@ test("personal CI builds are manual, source pinned and least privileged", () => 
     "all",
     "online-verify",
     "android-only",
+    "android-qa-verify",
   ]);
   assert.equal(build.on.workflow_dispatch.inputs.build_scope.default, "all");
   assert.deepEqual(build.jobs["npm-install"].needs, ["resolve", "cli"]);
@@ -740,6 +1012,7 @@ test("personal build scope routes only the selected platform jobs", () => {
     },
     { scope: "online-verify", expected: ["cli", "npm-install"] },
     { scope: "android-only", expected: ["android-qa-build", "android-qa", "android"] },
+    { scope: "android-qa-verify", expected: ["android-qa"] },
     { scope: "all", mac: "123", expected: ["mac-archive-verification"] },
     { scope: "online-verify", candidate: "123", expected: ["npm-install"] },
     { scope: "android-only", mac: "123", expected: [] },
@@ -758,7 +1031,11 @@ test("personal build scope routes only the selected platform jobs", () => {
               mac_archive_run_id: mac,
               npm_candidate_run_id: candidate,
             },
-            needs: { resolve: { result: "success" }, cli: { result: "success" } },
+            needs: {
+              resolve: { result: "success" },
+              cli: { result: "success" },
+              "android-qa-build": { result: scope === "android-qa-verify" ? "skipped" : "success" },
+            },
             cancelled: () => false,
           },
           { timeout: 100 },
@@ -1065,4 +1342,84 @@ test("desktop packaging smokes main pushes and only the pull requests that touch
   for (const action of ["actions/checkout", "actions/setup-node", "actions/upload-artifact"]) {
     assert.match(source, new RegExp(`${action}@[0-9a-f]{40} # v\\d+\\.\\d+\\.\\d+`));
   }
+});
+
+test("Android horizontal input stays inside the viewport rather than the system Back edges", () => {
+  const viewport = [0, 0, 1080, 2400];
+  const formula = [52, 1189, 1027, 1373];
+  const left = androidInteriorHorizontalSwipe(formula, viewport, "left");
+  assert.deepEqual(left, [799, 1281, 281, 1281]);
+  assert.deepEqual(
+    androidInteriorHorizontalSwipe(formula, viewport, "right"),
+    [281, 1281, 799, 1281],
+  );
+  assert.deepEqual(
+    androidInteriorHorizontalSwipe([-50, -20, 1130, 100], viewport, "left"),
+    [799, 50, 281, 50],
+  );
+  for (const rect of [
+    [990, 10, 1080, 50],
+    [0, 2500, 1080, 2600],
+    [0, 0, 0, 100],
+    [0, 0, NaN, 100],
+  ])
+    assert.throws(() => androidInteriorHorizontalSwipe(rect, viewport, "left"), /swipe/);
+  assert.throws(() => androidInteriorHorizontalSwipe(formula, viewport, "up"), /swipe/);
+});
+test("Horizontal formula QA selects the visible summation host instead of later short inline math", () => {
+  const xml =
+    '<hierarchy><node bounds="[0,0][1080,2400]"><node resource-id="android-math-webview" bounds="[52,1189][1027,1373]"><node text="∑" bounds="[57,1210][88,1252]" /></node><node resource-id="android-math-webview" bounds="[52,1066][1027,1126]" /></node></hierarchy>';
+  const nodes = androidUiNodes(xml);
+  const expected = [52, 1189, 1027, 1373];
+  assert.deepEqual(androidQaLongFormulaRect(nodes), expected);
+  assert.deepEqual(androidQaFormulaSwipeRect(nodes, expected), [52, 1210, 1027, 1252]);
+  assert.deepEqual(
+    androidInteriorHorizontalSwipe(
+      androidQaFormulaSwipeRect(nodes, expected),
+      nodes[0].rect,
+      "left",
+    ),
+    [799, 1231, 281, 1231],
+  );
+  const after = androidUiNodes(xml.replace('text="∑"', 'text=""'));
+  assert.deepEqual(androidQaLongFormulaRect(after, expected), expected);
+  assert.throws(() => androidQaLongFormulaRect(after), /formula/);
+  assert.throws(
+    () =>
+      androidQaLongFormulaRect(
+        androidUiNodes('<hierarchy><node bounds="[0,0][1080,2400]" /></hierarchy>'),
+        expected,
+      ),
+    /formula/,
+  );
+});
+
+test("Theme admission waits for actual appearance despite a healthy unchanged UI id", () => {
+  for (const value of [255, 230, 128])
+    assert.throws(() => assertAndroidThemeSample(value, "dark"), /theme/);
+  assert.doesNotThrow(() => assertAndroidThemeSample(26, "dark"));
+  for (const value of [26, 100, 128])
+    assert.throws(() => assertAndroidThemeSample(value, "light"), /theme/);
+  assert.doesNotThrow(() => assertAndroidThemeSample(255, "light"));
+  for (const value of [NaN, -1, 256])
+    assert.throws(() => assertAndroidThemeSample(value, "dark"), /theme/);
+});
+test("Math QA fixture keeps plain replies and supplies an unbreakable wide numerator", () => {
+  const source = readFileSync(
+    new URL("../packages/app/e2e/fixtures/catalog-codex.mjs", import.meta.url),
+    "utf8",
+  );
+  const functionSource = source.slice(
+    source.indexOf("function fixtureReply("),
+    source.indexOf("function respond("),
+  );
+  const reply = (input) =>
+    runInNewContext(functionSource + "\nfixtureReply({ input: " + JSON.stringify(input) + " })", {
+      process: { env: { PASEO_ANDROID_MATH_QA: "1" } },
+    });
+  assert.equal(reply("plain"), "Plain QA ready. No formula in this reply.");
+  const math = reply("math");
+  assert.match(math, /a_\{24\}/);
+  assert.ok(math.includes("Short formula $x^2$ inside prose."));
+  assert.match(math, /Math QA marker/);
 });
