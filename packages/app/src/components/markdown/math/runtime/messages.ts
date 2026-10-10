@@ -1,3 +1,5 @@
+export const MAX_MATH_RENDER_HEIGHT = 65536;
+export const MAX_MATH_SCROLL_REGIONS = 64;
 import type { MobilePanelGestureRegion } from "@/mobile-panels/gesture-regions";
 
 export interface MathRuntimeRequest {
@@ -10,6 +12,10 @@ export interface MathRuntimeRequest {
   linkColor: string;
   codeColor: string;
   codeBackground: string;
+  fontWeight?: string;
+  fontStyle?: string;
+  fontFamily?: string;
+  codeFontSize?: number;
 }
 
 export type MathRuntimeMessage =
@@ -43,7 +49,7 @@ function parseRegions(
   width: number,
   height: number,
 ): MobilePanelGestureRegion[] | null {
-  if (!Array.isArray(value) || value.length > 64) return null;
+  if (!Array.isArray(value) || value.length > MAX_MATH_SCROLL_REGIONS) return null;
   const regions: MobilePanelGestureRegion[] = [];
   for (const region of value) {
     if (!isRecord(region) || !isPositive(region.width) || !isPositive(region.height)) return null;
@@ -77,6 +83,8 @@ export function parseMathRuntimeRequest(value: unknown): MathRuntimeRequest | nu
   ) {
     return null;
   }
+  const typography = parseTypography(value);
+  if (!typography) return null;
   return {
     revision: value.revision,
     html: value.html,
@@ -87,6 +95,7 @@ export function parseMathRuntimeRequest(value: unknown): MathRuntimeRequest | nu
     linkColor: value.linkColor,
     codeColor: value.codeColor,
     codeBackground: value.codeBackground,
+    ...typography,
   };
 }
 
@@ -105,6 +114,7 @@ export function parseMathRuntimeMessage(value: unknown): MathRuntimeMessage | nu
     value.type === "size" &&
     isPositive(value.width) &&
     isPositive(value.height) &&
+    value.height <= MAX_MATH_RENDER_HEIGHT &&
     typeof value.fontCount === "number" &&
     Number.isSafeInteger(value.fontCount) &&
     value.fontCount >= 0 &&
@@ -129,4 +139,21 @@ export function parseMathRuntimeMessage(value: unknown): MathRuntimeMessage | nu
     };
   }
   return null;
+}
+
+function parseTypography(value: Record<string, unknown>) {
+  const fontWeight = value.fontWeight ?? "normal";
+  const fontStyle = value.fontStyle ?? "normal";
+  const fontFamily = value.fontFamily ?? "system-ui";
+  const codeFontSize = value.codeFontSize ?? value.fontSize;
+  if (
+    typeof fontWeight !== "string" ||
+    !/^(normal|bold|[1-9]00)$/.test(fontWeight) ||
+    !["normal", "italic"].includes(String(fontStyle)) ||
+    typeof fontFamily !== "string" ||
+    fontFamily.length > 1024 ||
+    !isPositive(codeFontSize)
+  )
+    return null;
+  return { fontWeight, fontStyle: String(fontStyle), fontFamily, codeFontSize };
 }

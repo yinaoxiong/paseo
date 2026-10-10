@@ -1,4 +1,9 @@
-import { parseMathRuntimeRequest, type MathRuntimeMessage } from "./messages";
+import {
+  MAX_MATH_RENDER_HEIGHT,
+  MAX_MATH_SCROLL_REGIONS,
+  parseMathRuntimeRequest,
+  type MathRuntimeMessage,
+} from "./messages";
 
 declare global {
   interface Window {
@@ -29,7 +34,6 @@ function measure(): void {
     host.querySelectorAll<HTMLElement>(".paseo-display-math, .paseo-inline-math"),
   )
     .filter((element) => element.scrollWidth > element.clientWidth + 1)
-    .slice(0, 64)
     .map((element) => {
       const rect = element.getBoundingClientRect();
       const x = Math.max(0, rect.left - bounds.left);
@@ -42,6 +46,15 @@ function measure(): void {
       };
     })
     .filter((region) => region.width > 0 && region.height > 0);
+  if (
+    !Number.isFinite(height) ||
+    height > MAX_MATH_RENDER_HEIGHT ||
+    horizontalScrollRegions.length > MAX_MATH_SCROLL_REGIONS
+  ) {
+    measuringRevision = 0;
+    send({ type: "failed", revision: latestRevision });
+    return;
+  }
   const regionsKey = JSON.stringify(horizontalScrollRegions);
   if (height < 1 || (height === measuredHeight && regionsKey === measuredRegions)) return;
   measuredHeight = height;
@@ -74,6 +87,13 @@ async function receive(value: unknown): Promise<void> {
     host.style.fontSize = `${request.fontSize}px`;
     host.style.lineHeight = `${request.lineHeight}px`;
     host.style.color = request.color;
+    host.style.fontWeight = request.fontWeight ?? "normal";
+    host.style.fontStyle = request.fontStyle ?? "normal";
+    host.style.fontFamily =
+      request.fontFamily === "normal"
+        ? "system-ui,sans-serif"
+        : `${request.fontFamily ?? "system-ui"},sans-serif`;
+    host.style.setProperty("--code-font-size", `${request.codeFontSize ?? request.fontSize}px`);
     host.style.setProperty("--link-color", request.linkColor);
     host.style.setProperty("--code-color", request.codeColor);
     host.style.setProperty("--code-background", request.codeBackground);

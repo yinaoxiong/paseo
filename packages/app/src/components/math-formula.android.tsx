@@ -26,8 +26,11 @@ function DisplayFormula({ expression, source, textStyle }: MathFormulaProps) {
       linkColor: color,
       codeColor: color,
       codeBackground: "transparent",
+      fontWeight: typeof text?.fontWeight === "string" ? text.fontWeight : "normal",
+      fontStyle: text?.fontStyle,
+      fontFamily: text?.fontFamily,
     }),
-    [text?.fontSize, text?.lineHeight, color],
+    [text?.fontSize, text?.lineHeight, color, text?.fontWeight, text?.fontStyle, text?.fontFamily],
   );
   const fallback = useMemo(
     () => (

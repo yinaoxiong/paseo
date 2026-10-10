@@ -1,3 +1,10 @@
+import { StyleSheet as NativeStyleSheet } from "react-native";
+import { renderRules as defaultMarkdownRenderRules } from "react-native-markdown-display";
+import { createMathNativeRenderer } from "@/components/markdown/math/native-renderer";
+import {
+  getInlineCodeAutoLinkUrl,
+  getInlineCodeAutoLinkSource,
+} from "@/utils/markdown-inline-code-link";
 import { ASSISTANT_IMAGE_DEFAULT_ASPECT_RATIO } from "@/utils/assistant-image-metadata";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { TaskListRow } from "@/components/task-list-row";
@@ -68,7 +75,11 @@ import { markdownNodeContainsType } from "@/utils/markdown-ast";
 import { useStableEvent } from "@/hooks/use-stable-event";
 import { HighlightedCodeBlock } from "@/components/highlighted-code-block";
 import { MathFormula } from "@/components/math-formula";
-import { MathParagraph } from "@/components/markdown/math/paragraph";
+import {
+  MathParagraph,
+  MathTextGroup,
+  supportsMathTextGroups,
+} from "@/components/markdown/math/paragraph";
 import { getMathFormulaTextStyle } from "@/components/math-formula-style";
 import { MarkdownFenceBlock } from "@/components/markdown/fence";
 import type { MarkdownPhase } from "@/components/markdown/fence/types";
@@ -941,43 +952,6 @@ function AssistantMarkdownImage({
   );
 }
 
-function getInlineCodeAutoLinkUrl(markdownParser: MarkdownIt, content: string): string | null {
-  const trimmed = content.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const matches:
-    | {
-        index: number;
-        lastIndex: number;
-        url: string;
-      }[]
-    | null = markdownParser.linkify.match(trimmed);
-  if (!matches || matches.length !== 1) {
-    return null;
-  }
-
-  const [match] = matches;
-  if (!match || match.index !== 0 || match.lastIndex !== trimmed.length) {
-    return null;
-  }
-
-  return match.url;
-}
-
-function getInlineCodeAutoLinkSource(input: {
-  href: string;
-  content: string;
-}): AssistantFileLinkSource {
-  return {
-    href: input.href,
-    text: input.content,
-    markup: "linkify",
-    sourceInfo: "auto",
-  };
-}
-
 interface AssistantMarkdownAstNode extends ASTNode {
   sourceInfo?: string;
 }
@@ -1544,7 +1518,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   });
 
   const markdownRules = useMemo<RenderRules>(() => {
-    return {
+    const rules: RenderRules = {
       heading1: (
         node: ASTNode,
         children: ReactNode[],
@@ -1660,18 +1634,53 @@ export const AssistantMessage = memo(function AssistantMessage({
       textgroup: (
         node: ASTNode,
         children: ReactNode[],
-        _parent: ASTNode[],
+        parent: ASTNode[],
         styles: MarkdownStyles,
         inheritedStyles: TextStyle = {},
-      ) => (
-        <MarkdownInheritedText
-          key={node.key}
-          inheritedStyles={inheritedStyles}
-          textStyle={styles.textgroup}
-        >
-          {children}
-        </MarkdownInheritedText>
-      ),
+      ) => {
+        const nativeContent = (
+          <MarkdownInheritedText
+            key={node.key}
+            inheritedStyles={inheritedStyles}
+            textStyle={styles.textgroup}
+          >
+            {children}
+          </MarkdownInheritedText>
+        );
+        if (
+          !supportsMathTextGroups ||
+          nodeHasParentType(parent, "paragraph") ||
+          !markdownNodeContainsType(node, "math_inline")
+        )
+          return nativeContent;
+        const nativeRenderer = createMathNativeRenderer(
+          { ...defaultMarkdownRenderRules, ...rules },
+          styles,
+          handleMarkdownLinkPress,
+          node,
+        );
+        const textStyle = NativeStyleSheet.flatten([
+          styles.body,
+          ...parent.toReversed().map((ancestor) => styles[ancestor.type]),
+          inheritedStyles,
+          styles.textgroup,
+        ]);
+        return (
+          <MathTextGroup
+            key={node.key}
+            node={node}
+            paragraphStyle={styles.paragraph}
+            textStyle={NativeStyleSheet.flatten(textStyle)}
+            linkStyle={styles.link}
+            codeStyle={styles.code_inline}
+            containsImage={false}
+            nativeRenderer={nativeRenderer}
+            nativeParents={parent}
+          >
+            {nativeContent}
+          </MathTextGroup>
+        );
+      },
       // strong/em/s have no custom rule in react-native-markdown-display's
       // defaults beyond wrapping children in a plain RN <Text>. On iOS the
       // paragraph/textgroup are native UITextViews (see markdown-text.ios.tsx),
@@ -1947,19 +1956,29 @@ export const AssistantMessage = memo(function AssistantMessage({
         children: ReactNode[],
         _parent: ASTNode[],
         styles: MarkdownStyles,
-      ) => (
-        <MathParagraph
-          key={node.key}
-          node={node}
-          paragraphStyle={styles.paragraph}
-          textStyle={styles.body}
-          linkStyle={styles.link}
-          codeStyle={styles.code_inline}
-          containsImage={markdownNodeContainsType(node, "image")}
-        >
-          {children}
-        </MathParagraph>
-      ),
+      ) => {
+        const nativeRenderer = createMathNativeRenderer(
+          { ...defaultMarkdownRenderRules, ...rules },
+          styles,
+          handleMarkdownLinkPress,
+          node,
+        );
+        return (
+          <MathParagraph
+            key={node.key}
+            node={node}
+            paragraphStyle={styles.paragraph}
+            textStyle={styles.body}
+            linkStyle={styles.link}
+            codeStyle={styles.code_inline}
+            containsImage={markdownNodeContainsType(node, "image")}
+            nativeRenderer={nativeRenderer}
+            nativeParents={_parent}
+          >
+            {children}
+          </MathParagraph>
+        );
+      },
       link: (node: ASTNode, children: ReactNode[], _parent: ASTNode[], styles: MarkdownStyles) => (
         <AssistantMarkdownLink
           key={node.key}
@@ -1998,7 +2017,17 @@ export const AssistantMessage = memo(function AssistantMessage({
         );
       },
     };
-  }, [client, fileLinkActions, markdownParser, occurrenceKey, phase, serverId, workspaceRoot]);
+    return rules;
+  }, [
+    client,
+    fileLinkActions,
+    handleMarkdownLinkPress,
+    markdownParser,
+    occurrenceKey,
+    phase,
+    serverId,
+    workspaceRoot,
+  ]);
 
   const blocks = useMemo(() => splitMarkdownBlocks(revealedMessage), [revealedMessage]);
   const keyedBlocks = useMemo(

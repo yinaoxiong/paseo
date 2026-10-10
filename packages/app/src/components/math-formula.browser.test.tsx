@@ -1,3 +1,6 @@
+import { createAssistantMarkdownParser } from "@/utils/assistant-markdown-parser";
+import tokensToAST from "react-native-markdown-display/src/lib/util/tokensToAST";
+import { renderMathParagraph } from "./markdown/math/paragraph-content";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
@@ -102,20 +105,20 @@ async function mountMathFrame(): Promise<HTMLIFrameElement> {
 
 function mathRequest(
   frame: HTMLIFrameElement,
-  input: { revision: number; html: string; width: number },
+  input: { revision: number; html: string; width: number } & Partial<MathRuntimeRequest>,
 ): Promise<MathRuntimeMessage> {
   const response = runtimeMessage(
     frame,
     (message) => message.type === "size" && message.revision === input.revision,
   );
   const request: MathRuntimeRequest = {
-    ...input,
     fontSize: 16,
     lineHeight: 24,
     color: "#eeeeee",
     linkColor: "#00aaff",
     codeColor: "#eeeeee",
     codeBackground: "#222222",
+    ...input,
   };
   const runtime = frame.contentWindow;
   if (!runtime) throw new Error("Missing iframe runtime");
@@ -124,6 +127,106 @@ function mathRequest(
 }
 
 describe("Android offline math HTML runtime", () => {
+  it("renders mixed inline code and action proxies without allowing URL navigation", async () => {
+    const frame = await mountMathFrame();
+    const paragraph = tokensToAST(
+      createAssistantMarkdownParser().parse("中文 `message-renderer.tsx` 与 $\\frac{1}{2}$", {}),
+    )[0];
+    const content = renderMathParagraph(paragraph, {
+      resolveInlineCode: (source) => ({ href: source, text: source, sourceType: "inline-code" }),
+    });
+    if (!content) throw new Error("Expected full paragraph HTML");
+    await mathRequest(frame, { revision: 1, html: content.html, width: 300 });
+    const anchor = frame.contentDocument?.querySelector("a");
+    expect(anchor?.textContent).toBe("message-renderer.tsx");
+    expect(anchor?.getAttribute("href")).toBe("#");
+    expect(frame.contentDocument?.querySelector(".frac-line")).not.toBeNull();
+    const clicked = runtimeMessage(frame, (message) => message.type === "link");
+    anchor!.click();
+    expect(await clicked).toEqual({ type: "link", revision: 1, index: 0 });
+  });
+
+  it("refuses extreme dimensions and excessive overflow regions instead of clipping or silently dropping touch protection", async () => {
+    const frame = await mountMathFrame();
+    async function fail(revision: number, html: string) {
+      const failed = runtimeMessage(
+        frame,
+        (message) => message.type === "failed" && message.revision === revision,
+      );
+      frame.contentWindow!.postMessage(
+        {
+          revision,
+          html,
+          width: 200,
+          fontSize: 16,
+          lineHeight: 24,
+          color: "black",
+          linkColor: "blue",
+          codeColor: "black",
+          codeBackground: "white",
+        },
+        "*",
+      );
+      expect(await failed).toEqual({ type: "failed", revision });
+    }
+    await fail(1, `<div style="height:100000px">too tall</div>`);
+    const formula = renderKatexFormulaHtml(
+      "\\frac{a_1+a_2+a_3+a_4+a_5+a_6+a_7+a_8+a_9+a_{10}+a_{11}+a_{12}}{1}",
+      true,
+    );
+    await fail(2, `<div class="paseo-display-math">${formula}</div>`.repeat(65));
+    const recovered = await mathRequest(frame, {
+      revision: 3,
+      html: `<span class="paseo-inline-math">${renderKatexFormulaHtml("x", false)}</span>`,
+      width: 200,
+    });
+    expect(recovered.type).toBe("size");
+  });
+
+  it("retains inherited text formatting and the independent code size", async () => {
+    const frame = await mountMathFrame();
+    await mathRequest(frame, {
+      revision: 1,
+      html: "标题 <code>code</code>",
+      width: 300,
+      fontWeight: "500",
+      fontStyle: "italic",
+      fontFamily: "monospace",
+      codeFontSize: 13,
+    });
+    const host = frame.contentDocument!.getElementById("content")!;
+    expect(host.style.fontWeight).toBe("500");
+    expect(host.style.fontStyle).toBe("italic");
+    expect(host.style.fontFamily).toContain("monospace");
+    expect(frame.contentWindow!.getComputedStyle(host.querySelector("code")!).fontSize).toBe(
+      "13px",
+    );
+  });
+
+  it("reflows after text-scale and theme changes while keeping the same completed content", async () => {
+    const frame = await mountMathFrame();
+    const html =
+      `中文与 <span class="paseo-inline-math">${renderKatexFormulaHtml("x^2", false)}</span> `.repeat(
+        12,
+      );
+    const normal = await mathRequest(frame, { revision: 1, html, width: 300 });
+    const large = await mathRequest(frame, {
+      revision: 2,
+      html,
+      width: 300,
+      fontSize: 24,
+      lineHeight: 36,
+      color: "black",
+    });
+    if (normal.type !== "size" || large.type !== "size")
+      throw new Error("Expected measured content");
+    expect(large.height).toBeGreaterThan(normal.height);
+    expect(frame.contentDocument?.getElementById("content")?.style.color).toBe("black");
+    const restored = await mathRequest(frame, { revision: 3, html, width: 300 });
+    if (restored.type !== "size") throw new Error("Expected restored measurement");
+    expect(restored.height).toBe(normal.height);
+  });
+
   it("keeps short inline fractions on the surrounding prose baseline", async () => {
     const frame = await mountMathFrame();
     const formula = renderKatexFormulaHtml("\\frac{1}{2}", false);

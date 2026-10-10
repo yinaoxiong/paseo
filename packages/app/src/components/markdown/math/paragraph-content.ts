@@ -10,6 +10,10 @@ export interface MathParagraphContent {
   links: AssistantFileLinkSource[];
 }
 
+export interface MathParagraphOptions {
+  resolveInlineCode: (content: string) => AssistantFileLinkSource | null;
+}
+
 const INLINE_TAGS = new Map([
   ["strong", "strong"],
   ["em", "em"],
@@ -24,9 +28,11 @@ function nodeText(node: ASTNode): string {
 function renderContainer(
   node: ASTNode,
   links: AssistantFileLinkSource[],
+  options?: MathParagraphOptions,
+  insideLink = false,
 ): MathParagraphContent | null {
   const group = node.type === "paragraph" || node.type === "inline" || node.type === "textgroup";
-  const link = node.type === "link";
+  const link = node.type === "link" || node.type === "blocklink";
   const tag = INLINE_TAGS.get(node.type);
   if (!group && !link && !tag) return null;
 
@@ -48,7 +54,7 @@ function renderContainer(
   }
   const parts: MathParagraphContent[] = [];
   for (const child of node.children) {
-    const part = renderNode(child, links);
+    const part = renderNode(child, links, options, insideLink || link);
     if (!part) return null;
     parts.push(part);
   }
@@ -59,7 +65,12 @@ function renderContainer(
   };
 }
 
-function renderNode(node: ASTNode, links: AssistantFileLinkSource[]): MathParagraphContent | null {
+function renderNode(
+  node: ASTNode,
+  links: AssistantFileLinkSource[],
+  options?: MathParagraphOptions,
+  insideLink = false,
+): MathParagraphContent | null {
   if (node.type === "text") {
     return { html: escapeFormulaSource(node.content), text: node.content, links };
   }
@@ -74,14 +85,72 @@ function renderNode(node: ASTNode, links: AssistantFileLinkSource[]): MathParagr
     return { html, text: model.source, links };
   }
   if (node.type === "code_inline") {
-    // Native file/URL actions depend on workspace context, including bare filenames.
-    // The prototype retains that path for every inline-code paragraph.
-    return null;
+    // A caller must explicitly preserve contextual file and URL actions.
+    if (!options) return null;
+    let html = `<code>${escapeFormulaSource(node.content)}</code>`;
+    const source = insideLink ? null : options.resolveInlineCode(node.content);
+    if (source) {
+      const index = links.length;
+      links.push(source);
+      html = `<a href="#" data-link="${index}">${html}</a>`;
+    }
+    return { html, text: node.content, links };
   }
-  return renderContainer(node, links);
+  return renderContainer(node, links, options, insideLink);
 }
 
-export function renderMathParagraph(node: ASTNode): MathParagraphContent | null {
+export function renderMathParagraph(
+  node: ASTNode,
+  options?: MathParagraphOptions,
+): MathParagraphContent | null {
   if (!markdownNodeContainsType(node, "math_inline")) return null;
-  return renderNode(node, []);
+  return renderNode(node, [], options);
+}
+
+export type MathParagraphPart =
+  | { kind: "html"; key: string; node: ASTNode; content: MathParagraphContent }
+  | { kind: "native"; key: string; node: ASTNode };
+
+// Split only at native images. Rebuild their surrounding AST containers so the
+// existing renderer retains image preview, linked-image actions and styling.
+function splitImageRuns(node: ASTNode): ASTNode[] {
+  if (node.type === "image" || !markdownNodeContainsType(node, "image")) return [node];
+  const runs: ASTNode[] = [];
+  let children: ASTNode[] = [];
+  const flush = () => {
+    if (children.length) runs.push({ ...node, children });
+    children = [];
+  };
+  for (const child of node.children) {
+    for (const part of splitImageRuns(child)) {
+      if (markdownNodeContainsType(part, "image")) {
+        flush();
+        runs.push({ ...node, children: [part] });
+      } else children.push(part);
+    }
+  }
+  flush();
+  return runs;
+}
+
+export function renderMathParagraphParts(
+  node: ASTNode,
+  options?: MathParagraphOptions,
+): MathParagraphPart[] | null {
+  if (!markdownNodeContainsType(node, "math_inline")) return null;
+  return splitImageRuns(node).map((part, index) => {
+    const content = renderMathParagraph(part, options);
+    const key = `${node.key}:${index}`;
+    return content
+      ? { kind: "html", key, node: part, content }
+      : { kind: "native", key, node: part };
+  });
+}
+
+export function shouldRenderMathTextGroup(node: ASTNode, parents: ASTNode[]): boolean {
+  return (
+    node.type === "textgroup" &&
+    !parents.some((parent) => parent.type === "paragraph") &&
+    markdownNodeContainsType(node, "math_inline")
+  );
 }

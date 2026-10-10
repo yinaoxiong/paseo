@@ -1,19 +1,11 @@
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useReducer,
-  useRef,
-  type ReactNode,
-} from "react";
+import { MathRuntimeRequestDriver, reduceMathHostLayout } from "./request-driver";
+import { useCallback, useLayoutEffect, useMemo, useReducer, useRef, type ReactNode } from "react";
 import { View, StyleSheet, useWindowDimensions, type LayoutChangeEvent } from "react-native";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
-import { mathRuntimeHtml } from "./runtime/html.gen";
+import { mathRuntimeHtml, mathRuntimeIdentity } from "./runtime/html.gen";
 import { parseMathRuntimeMessage, type MathRuntimeRequest } from "./runtime/messages";
 import { useAnimatedRef } from "react-native-reanimated";
 import { useMobilePanelScrollSurface } from "@/mobile-panels/provider";
-import type { MobilePanelGestureRegion } from "@/mobile-panels/gesture-regions";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import { createAnimatedViewRef } from "@/mobile-panels/native-measurement-ref";
 
@@ -24,6 +16,10 @@ export interface MathPresentation {
   linkColor: string;
   codeColor: string;
   codeBackground: string;
+  fontWeight?: string;
+  fontStyle?: string;
+  fontFamily?: string;
+  codeFontSize?: number;
 }
 
 interface MathHtmlHostProps {
@@ -31,30 +27,6 @@ interface MathHtmlHostProps {
   presentation: MathPresentation;
   fallback: ReactNode;
   onLink?: (index: number) => void;
-}
-
-interface HostLayout {
-  width: number;
-  height: number | null;
-  failed: boolean;
-  measuredWidth: number;
-  regions: MobilePanelGestureRegion[];
-}
-
-type HostEvent =
-  | { type: "width"; width: number }
-  | { type: "size"; height: number; width: number; regions: MobilePanelGestureRegion[] }
-  | { type: "pending" }
-  | { type: "failed" };
-
-function reduceLayout(state: HostLayout, event: HostEvent): HostLayout {
-  if (event.type === "width") {
-    if (Math.abs(state.width - event.width) < 0.5) return state;
-    return { ...state, width: event.width, regions: [] };
-  }
-  if (event.type === "failed") return { ...state, failed: true, regions: [] };
-  if (event.type === "pending") return state.regions.length ? { ...state, regions: [] } : state;
-  return { ...state, height: event.height, measuredWidth: event.width, regions: event.regions };
 }
 
 const SOURCE = { html: mathRuntimeHtml };
@@ -65,13 +37,13 @@ export function MathHtmlHost({ html, presentation, fallback, onLink }: MathHtmlH
   const surfaceRef = useAnimatedRef<View>();
   const attachSurface = useMemo(() => createAnimatedViewRef(surfaceRef), [surfaceRef]);
   const active = useRetainedPanelActive();
-  const ready = useRef(false);
-  const latest = useRef<MathRuntimeRequest | null>(null);
-  const revision = useRef(0);
-  const [layout, dispatch] = useReducer(reduceLayout, {
+  const driver = useMemo(() => new MathRuntimeRequestDriver(mathRuntimeIdentity), []);
+  const renderTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [layout, dispatch] = useReducer(reduceMathHostLayout, {
     width: 0,
     height: null,
     failed: false,
+    painted: false,
     measuredWidth: 0,
     regions: [],
   });
@@ -86,6 +58,10 @@ export function MathHtmlHost({ html, presentation, fallback, onLink }: MathHtmlH
       linkColor: presentation.linkColor,
       codeColor: presentation.codeColor,
       codeBackground: presentation.codeBackground,
+      fontWeight: presentation.fontWeight ?? "normal",
+      fontStyle: presentation.fontStyle ?? "normal",
+      fontFamily: presentation.fontFamily ?? "system-ui",
+      codeFontSize: (presentation.codeFontSize ?? presentation.fontSize) * fontScale,
     }),
     [
       html,
@@ -97,6 +73,10 @@ export function MathHtmlHost({ html, presentation, fallback, onLink }: MathHtmlH
       presentation.linkColor,
       presentation.codeColor,
       presentation.codeBackground,
+      presentation.fontWeight,
+      presentation.fontStyle,
+      presentation.fontFamily,
+      presentation.codeFontSize,
     ],
   );
   const send = useCallback((value: MathRuntimeRequest) => {
@@ -106,25 +86,63 @@ export function MathHtmlHost({ html, presentation, fallback, onLink }: MathHtmlH
     );
   }, []);
 
-  useLayoutEffect(() => {
-    if (request.width <= 0) return;
-    dispatch({ type: "pending" });
-    const next = { ...request, revision: ++revision.current };
-    latest.current = next;
-    if (ready.current) send(next);
-  }, [request, send]);
-
-  useEffect(
-    () => () => {
-      ready.current = false;
-      latest.current = null;
-    },
-    [],
-  );
-
-  const onLayout = useCallback((event: LayoutChangeEvent) => {
-    dispatch({ type: "width", width: event.nativeEvent.layout.width });
+  const clearRenderTimeout = useCallback(() => {
+    if (renderTimeout.current !== null) clearTimeout(renderTimeout.current);
+    renderTimeout.current = null;
   }, []);
+  const scheduleRenderTimeout = useCallback(() => {
+    clearRenderTimeout();
+    const revision = driver.revision;
+    if (!revision) return;
+    renderTimeout.current = setTimeout(() => {
+      if (driver.expire(revision)) dispatch({ type: "failed" });
+    }, 10000);
+  }, [clearRenderTimeout, driver]);
+  useLayoutEffect(() => {
+    driver.start();
+    return () => {
+      driver.stop();
+      clearRenderTimeout();
+    };
+  }, [driver, clearRenderTimeout]);
+  useLayoutEffect(() => {
+    if (request.width <= 0) {
+      driver.suspend();
+      clearRenderTimeout();
+      return;
+    }
+    const next = driver.update(request);
+    if (!driver.revision) {
+      clearRenderTimeout();
+      dispatch({ type: "failed" });
+      return;
+    }
+    dispatch({ type: "pending", cached: next.cached });
+    if (next.reload) webView.current?.reload();
+    else if (next.request) send(next.request);
+    scheduleRenderTimeout();
+  }, [driver, request, send, scheduleRenderTimeout, clearRenderTimeout]);
+  const onLoadStart = useCallback(() => {
+    if (!driver.isActive) return;
+    driver.reload();
+    dispatch({ type: "document" });
+    scheduleRenderTimeout();
+  }, [driver, scheduleRenderTimeout]);
+
+  const onLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      if (!driver.isActive) return;
+      const width = Number.isFinite(event.nativeEvent.layout.width)
+        ? Math.max(0, event.nativeEvent.layout.width)
+        : 0;
+      if (width === 0) {
+        driver.suspend();
+        clearRenderTimeout();
+      }
+      dispatch({ type: "width", width });
+    },
+    [driver, clearRenderTimeout],
+  );
   const onMessage = useCallback(
     (event: WebViewMessageEvent) => {
       let value: unknown;
@@ -136,28 +154,40 @@ export function MathHtmlHost({ html, presentation, fallback, onLink }: MathHtmlH
       const message = parseMathRuntimeMessage(value);
       if (!message) return;
       if (message.type === "ready") {
-        ready.current = true;
-        if (latest.current) send(latest.current);
+        const queued = driver.ready();
+        if (queued) {
+          send(queued);
+          scheduleRenderTimeout();
+        }
         return;
       }
-      const current = latest.current;
-      if (!current || current.revision !== message.revision) return;
-      if (message.type === "failed") dispatch({ type: "failed" });
-      if (message.type === "size" && Math.abs(message.width - current.width) < 1) {
+      const accepted = driver.accept(message);
+      if (!accepted) return;
+      if (accepted.type === "failed") {
+        clearRenderTimeout();
+        dispatch({ type: "failed" });
+      }
+      if (accepted.type === "size") {
+        clearRenderTimeout();
         dispatch({
           type: "size",
-          height: message.height,
-          width: message.width,
-          regions: message.horizontalScrollRegions,
+          height: accepted.height,
+          width: accepted.width,
+          regions: accepted.horizontalScrollRegions,
         });
       }
-      if (message.type === "link") onLink?.(message.index);
+      if (accepted.type === "link") onLink?.(accepted.index);
     },
-    [onLink, send],
+    [driver, onLink, send, clearRenderTimeout, scheduleRenderTimeout],
   );
-  const onError = useCallback(() => dispatch({ type: "failed" }), []);
+  const onError = useCallback(() => {
+    if (!driver.isActive) return;
+    driver.failedTransport();
+    clearRenderTimeout();
+    dispatch({ type: "failed" });
+  }, [driver, clearRenderTimeout]);
   const allowNavigation = useCallback((load: { url: string }) => load.url === "about:blank", []);
-  const showHtml = layout.height !== null && !layout.failed;
+  const showHtml = layout.painted && layout.height !== null && !layout.failed;
   const gestureSurface = useMemo(
     () =>
       active && showHtml && layout.regions.length > 0
@@ -177,7 +207,11 @@ export function MathHtmlHost({ html, presentation, fallback, onLink }: MathHtmlH
       ref={attachSurface}
       collapsable={false}
       onLayout={onLayout}
-      style={[styles.container, showHtml && { height: layout.height }]}
+      style={[
+        styles.container,
+        !layout.failed && layout.height !== null && { minHeight: layout.height },
+        showHtml && { height: layout.height },
+      ]}
     >
       {!showHtml && fallback}
       <WebView
@@ -189,6 +223,8 @@ export function MathHtmlHost({ html, presentation, fallback, onLink }: MathHtmlH
         style={styles.surface}
         pointerEvents={showHtml ? "auto" : "none"}
         onMessage={onMessage}
+        onLoadStart={onLoadStart}
+        onRenderProcessGone={onError}
         onError={onError}
         onShouldStartLoadWithRequest={allowNavigation}
         scrollEnabled={false}

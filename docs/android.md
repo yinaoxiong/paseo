@@ -31,6 +31,20 @@ as a backup. CI only exposes signing material to approved personal source commit
 
 `development` uses Android `debug`.
 
+## Assistant math
+
+Android uses local KaTeX HTML for formula-bearing text runs. Images remain native so their
+loading, authenticated sources and preview actions stay with the existing image component.
+Native Markdown cleanup removes paragraphs in tight lists; their textgroups need the same math
+entry point. File and URL actions stay with the native link resolver, including inline-code
+filenames. Whole-message copying still reads the original Markdown.
+
+Rendering failure keeps the native source/actions visible. Layout reuse cannot make an unloaded
+WebView visible: wait for its current document to report a valid measurement. Resource, width,
+text-scale and presentation changes invalidate cached geometry. Caches do not replace list
+virtualization or establish device memory/scroll performance; use [mobile testing](mobile-testing.md)
+for actual native acceptance. iOS retains its source-formula implementation.
+
 ## Version codes
 
 `packages/app/native-release-version.js` is the single definition of native and F-Droid version-code math. Do not re-derive these numbers anywhere else — a drifted copy produces changelog files that match no published APK, and nothing fails loudly.
