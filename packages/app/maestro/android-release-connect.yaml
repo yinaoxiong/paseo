@@ -1,0 +1,32 @@
+appId: sh.paseo.personal
+---
+- launchApp:
+    clearState: true
+- extendedWaitUntil:
+    visible:
+      id: welcome-screen
+    timeout: 60000
+- assertNotVisible:
+    id: root-error-boundary
+- tapOn:
+    id: welcome-direct-connection
+- extendedWaitUntil:
+    visible:
+      id: direct-host-input
+    timeout: 30000
+- tapOn:
+    id: direct-host-input
+- eraseText
+- inputText: ${QA_HOST}
+- tapOn:
+    id: direct-port-input
+- eraseText
+- inputText: ${QA_PORT}
+- tapOn:
+    id: direct-host-submit
+- extendedWaitUntil:
+    visible:
+      id: menu-button
+    timeout: 60000
+- assertNotVisible:
+    id: root-error-boundary

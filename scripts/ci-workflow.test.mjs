@@ -41,7 +41,191 @@ import {
   resolvePersonalBuildBranch,
 } from "./personal/trusted-source.mjs";
 
+import { androidBuildScript } from "./personal/android-build-script.mjs";
+import {
+  assertHealthyAndroidUi,
+  androidFrameChanged,
+  androidUiNodes,
+  assertAndroidPanelsClosed,
+  assertAndroidFormulaFrameStable,
+  assertAndroidDestination,
+  androidFrameBrightness,
+  androidCaptureOptions,
+  androidQaWorkspaceRowId,
+  assertAndroidWorkspaceSelected,
+} from "./personal/android-ui-proof.mjs";
 const repoRoot = new URL("../", import.meta.url);
+test("native QA rejects error pages and absent normal UI despite a surviving process", () => {
+  const healthy =
+    '<hierarchy><node resource-id="message-input-root" text="" bounds="[0,0][100,100]" /></hierarchy>';
+  assert.doesNotThrow(() => assertHealthyAndroidUi(healthy, "message-input-root"));
+  assert.throws(
+    () =>
+      assertHealthyAndroidUi(
+        healthy.replace("[0,0][100,100]", "[-100,0][-1,100]"),
+        "message-input-root",
+      ),
+    /Normal UI/,
+  );
+  assert.throws(() => assertHealthyAndroidUi(healthy, "android-math-webview"), /Normal UI/);
+  assert.throws(
+    () =>
+      assertHealthyAndroidUi(
+        healthy.replace("</hierarchy>", '<node resource-id="root-error-boundary" /></hierarchy>'),
+        "message-input-root",
+      ),
+    /error boundary/,
+  );
+  assert.throws(
+    () =>
+      assertHealthyAndroidUi(
+        healthy.replace('text=""', 'text="Object is not a function"'),
+        "message-input-root",
+      ),
+    /error boundary/,
+  );
+  const before = Buffer.alloc(16 + 30 * 30 * 4);
+  before.writeUInt32LE(30, 0);
+  before.writeUInt32LE(30, 4);
+  before.writeUInt32LE(1, 8);
+  const after = Buffer.from(before);
+  after.fill(255, 16);
+  assert.equal(androidFrameChanged(before, before, [0, 0, 30, 30]), false);
+  assert.equal(androidFrameChanged(before, after, [0, 0, 30, 30]), true);
+  assert.throws(() => androidFrameChanged(before, after, [-1, 0, 30, 30]), /crop/);
+});
+test("native QA rejects visible panels and ignored navigation or appearance transitions", () => {
+  const base =
+    '<hierarchy><node resource-id="root" bounds="[0,0][300,600]" /><node resource-id="message-input-root" text="Plain QA ready." bounds="[0,300][300,500]" /></hierarchy>';
+  const nodes = androidUiNodes(base);
+  assert.doesNotThrow(() => assertAndroidPanelsClosed(nodes));
+  assert.doesNotThrow(() =>
+    assertAndroidDestination(nodes, { text: "Plain QA ready.", noMath: true }),
+  );
+  assert.throws(
+    () => assertAndroidDestination(nodes, { text: "Math QA marker." }),
+    /Destination text/,
+  );
+  const panel = androidUiNodes(
+    base.replace(
+      "</hierarchy>",
+      '<node resource-id="sidebar-close" bounds="[0,0][30,30]" /></hierarchy>',
+    ),
+  );
+  assert.throws(() => assertAndroidPanelsClosed(panel), /visible panel control/);
+  const math = androidUiNodes(
+    base.replace(
+      "</hierarchy>",
+      '<node resource-id="android-math-webview" bounds="[0,0][300,100]" /></hierarchy>',
+    ),
+  );
+  assert.throws(() => assertAndroidDestination(math, { noMath: true }), /still visible/);
+  assert.throws(
+    () => assertAndroidFormulaFrameStable([0, 0, 300, 100], [30, 0, 330, 100]),
+    /host moved/,
+  );
+  const dark = Buffer.alloc(16 + 30 * 30 * 4);
+  dark.writeUInt32LE(30, 0);
+  dark.writeUInt32LE(30, 4);
+  dark.writeUInt32LE(1, 8);
+  const light = Buffer.from(dark);
+  light.fill(255, 16);
+  assert.equal(androidFrameBrightness(dark, [0, 0, 30, 30]), 0);
+  assert.equal(androidFrameBrightness(light, [0, 0, 30, 30]), 255);
+});
+test("native QA keeps normal motion and fills the current separate Host/Port inputs", () => {
+  const w = loadYaml(
+    readFileSync(new URL("../.github/workflows/personal-build.yml", import.meta.url), "utf8"),
+  );
+  const emulator = w.jobs["android-qa"].steps.find((s) =>
+    s.uses?.startsWith("ReactiveCircus/android-emulator-runner@"),
+  );
+  assert.equal(emulator.with["disable-animations"], false);
+  const flow = readFileSync(
+    new URL("../packages/app/maestro/android-release-connect.yaml", import.meta.url),
+    "utf8",
+  );
+  assert.match(flow, /extendedWaitUntil:[\s\S]*direct-host-input/);
+  assert.match(flow, /direct-host-input[\s\S]*QA_HOST[\s\S]*direct-port-input[\s\S]*QA_PORT/);
+  assert.doesNotMatch(flow, /QA_ENDPOINT/);
+});
+test("native QA initializes only the fixture-owned workspace through a visible sidebar row", () => {
+  const fixture = {
+    serverId: "srv_qa",
+    workspaceIds: { math: "wks_math" },
+    routes: { math: "paseo-personal://h/srv_qa/workspace/wks_math?open=agent%3Atest" },
+  };
+  const id = androidQaWorkspaceRowId(fixture);
+  assert.equal(id, "sidebar-workspace-row-srv_qa:wks_math");
+  assert.throws(() => androidQaWorkspaceRowId({ ...fixture, serverId: "srv_other" }), /identity/);
+  assert.throws(() => androidQaWorkspaceRowId({ ...fixture, workspaceIds: {} }), /identity/);
+  const absent =
+    '<hierarchy><node resource-id="root" bounds="[0,0][300,600]" /><node resource-id="menu-button" bounds="[0,0][50,50]" /></hierarchy>';
+  assert.throws(() => assertHealthyAndroidUi(absent, id), /Normal UI/);
+  const ready = absent.replace(
+    "</hierarchy>",
+    `<node resource-id="${id}" bounds="[0,50][300,100]" /></hierarchy>`,
+  );
+  assert.doesNotThrow(() => assertHealthyAndroidUi(ready, id));
+  assert.throws(
+    () => assertAndroidWorkspaceSelected(androidUiNodes(ready), fixture),
+    /measured node/,
+  );
+  const selected =
+    '<hierarchy><node resource-id="root" bounds="[0,0][300,600]" /><node resource-id="workspace-deck-entry-srv_qa:wks_math" bounds="[0,0][300,600]" /><node resource-id="workspace-header-menu-trigger" bounds="[250,0][300,50]" /></hierarchy>';
+  assert.doesNotThrow(() => assertAndroidWorkspaceSelected(androidUiNodes(selected), fixture));
+  assert.throws(
+    () =>
+      assertAndroidWorkspaceSelected(
+        androidUiNodes(selected.replace("srv_qa:wks_math", "srv_other:wks_math")),
+        fixture,
+      ),
+    /measured node/,
+  );
+  assert.throws(
+    () =>
+      assertAndroidWorkspaceSelected(
+        androidUiNodes(selected.replace("workspace-header-menu-trigger", "menu-button")),
+        fixture,
+      ),
+    /measured node/,
+  );
+  const stillOpen = selected.replace(
+    "</hierarchy>",
+    '<node resource-id="sidebar-close" bounds="[0,0][50,50]" /></hierarchy>',
+  );
+  assert.throws(
+    () => assertAndroidWorkspaceSelected(androidUiNodes(stillOpen), fixture),
+    /visible panel control/,
+  );
+});
+test("native screenshot capture accepts a complete Pixel RGBA frame", () => {
+  const command = [process.execPath, ["-e", "process.stdout.write(Buffer.alloc(1080*2400*4))"]];
+  assert.throws(
+    () => execFileSync(...command),
+    (error) => error.code === "ENOBUFS",
+  );
+  assert.equal(execFileSync(...command, androidCaptureOptions).length, 1080 * 2400 * 4);
+});
+test("native QA shares optimized compilation and gates signer-bearing Android delivery", () => {
+  assert.equal(
+    androidBuildScript("x86_64").replace("x86_64", "arm64-v8a"),
+    androidBuildScript("arm64-v8a"),
+  );
+  assert.match(androidBuildScript("x86_64"), /:app:createBundleReleaseJsAndAssets/);
+  assert.throws(() => androidBuildScript("shell;evil"), /Unsupported/);
+  const w = loadYaml(
+    readFileSync(new URL("../.github/workflows/personal-build.yml", import.meta.url), "utf8"),
+  );
+  assert.deepEqual(w.jobs.android.needs, ["resolve", "android-qa"]);
+  for (const key of ["android-qa-build", "android-qa"]) {
+    assert.doesNotMatch(JSON.stringify(w.jobs[key]), /secrets\./);
+    assert.equal(w.jobs[key].permissions.contents, "read");
+  }
+  assert.deepEqual(w.jobs["android-qa"].needs, ["resolve", "android-qa-build"]);
+  assert.match(JSON.stringify(w.jobs["android-qa"]), /android-emulator-runner@[a-f0-9]{40}/);
+  assert.match(JSON.stringify(w.jobs["android-qa"]), /smoke-android-release/);
+});
 test("signed Android preview admits only its exact named candidate and frozen lineage", () => {
   const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   const candidate = {
@@ -484,7 +668,10 @@ test("personal CI builds are manual, source pinned and least privileged", () => 
     false,
   );
   for (const key of ["cli", "desktop", "android"]) {
-    assert.equal(build.jobs[key].needs, "resolve");
+    assert.deepEqual(
+      build.jobs[key].needs,
+      key === "android" ? ["resolve", "android-qa"] : "resolve",
+    );
     assert.equal(build.jobs[key].steps[0].with.ref, "${{ needs.resolve.outputs.sha }}");
     assert.equal(build.jobs[key].steps[0].with["persist-credentials"], false);
   }
@@ -547,9 +734,12 @@ test("personal build scope routes only the selected platform jobs", () => {
     readFileSync(new URL(".github/workflows/personal-build.yml", repoRoot), "utf8"),
   );
   const scenarios = [
-    { scope: "all", expected: ["cli", "npm-install", "desktop", "android"] },
+    {
+      scope: "all",
+      expected: ["cli", "npm-install", "desktop", "android-qa-build", "android-qa", "android"],
+    },
     { scope: "online-verify", expected: ["cli", "npm-install"] },
-    { scope: "android-only", expected: ["android"] },
+    { scope: "android-only", expected: ["android-qa-build", "android-qa", "android"] },
     { scope: "all", mac: "123", expected: ["mac-archive-verification"] },
     { scope: "online-verify", candidate: "123", expected: ["npm-install"] },
     { scope: "android-only", mac: "123", expected: [] },

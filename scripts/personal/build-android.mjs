@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { createBuildInfo, repoRoot } from "./build-info.mjs";
 import { writeArtifactManifest } from "./manifest.mjs";
+import { androidBuildScript } from "./android-build-script.mjs";
 
 const info = createBuildInfo(Number(process.argv[2] ?? "1"));
 const output = path.resolve(process.argv[3] ?? path.join(repoRoot, ".local-build"));
@@ -69,24 +70,7 @@ try {
     "-v",
     `${prefix}-${relative.replaceAll("/", "-") || "root"}:/workspaces/paseo/${relative ? `${relative}/` : ""}node_modules`,
   ]);
-  const script = [
-    "set -euo pipefail",
-    "export PATH=/usr/local/bin:$PATH",
-    "node --version",
-    "npm --version",
-    "free -h",
-    'for ci_memory_file in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max; do if [ -r "$ci_memory_file" ]; then printf "%s: " "$ci_memory_file"; cat "$ci_memory_file"; fi; done',
-    "npm ci --ignore-scripts --no-audit --no-fund",
-    "npm run postinstall",
-    "npm run build:app-deps",
-    'node -e \'const fs=require("node:fs");fs.writeFileSync("/workspaces/paseo/android-toolchain.json",JSON.stringify({node:process.version,npm:require("node:child_process").execFileSync("npm",["--version"],{encoding:"utf8"}).trim()}))\'',
-    "cd packages/app",
-    "npx expo prebuild --platform android --no-install --clean",
-    "cd android",
-    // Let Hermes finish before native compilers compete for the runner's memory.
-    "./gradlew :app:createBundleReleaseJsAndAssets --info --no-daemon --max-workers=1 -Dorg.gradle.parallel=false '-Dorg.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m'",
-    "./gradlew :app:assembleRelease -PreactNativeArchitectures=arm64-v8a -x lint -x test --no-daemon --max-workers=1 -Dorg.gradle.parallel=false '-Dorg.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=768m'",
-  ].join("\n");
+  const script = androidBuildScript("arm64-v8a");
   // Build container gets no signing key, password or official Expo/EAS credential.
   run("docker", [
     "run",

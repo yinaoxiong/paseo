@@ -43,6 +43,14 @@ config.containerEnv = {
   PASEO_NPM_CANDIDATE_MANIFEST_SHA256: process.env.PASEO_NPM_CANDIDATE_MANIFEST_SHA256 ?? "",
   PASEO_BUILD_MARKER: process.env.PASEO_BUILD_MARKER ?? "checks",
 };
+if (process.env.PASEO_ANDROID_QA === "true") {
+  // Linux CI only: adb reverse reaches the loopback-only isolated fixture, never production.
+  const state = path.join(temp, "paseo-qa-state");
+  mkdirSync(state, { recursive: true });
+  config.runArgs = [...(config.runArgs ?? []), "--network=host"];
+  config.mounts.push(`source=${state},target=/tmp/paseo-qa-state,type=bind`);
+  config.containerEnv.PASEO_ANDROID_QA_STATE = "/tmp/paseo-qa-state";
+}
 writeFileSync(
   path.join(temp, "paseo-personal-ci-devcontainer.json"),
   JSON.stringify(config, null, 2) + "\n",

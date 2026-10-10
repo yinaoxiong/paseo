@@ -1,5 +1,19 @@
 # Mobile Testing
 
+## Personal Release smoke
+
+Personal Android builds first install a separate x86_64 Release/Hermes QA APK on a CI emulator.
+The native smoke uses an isolated fixture daemon and existing mobile selectors. It checks normal
+UI, rejects the root error page, forces chat/theme/background lifecycle transitions and checks
+scrolling/panels. Select the fixture workspace through the visible sidebar before chat links;
+native directory subscriptions are demand-driven, and a cold workspace URL does not hydrate them.
+Failure retains screenshots, hierarchy and logcat. The ARM64 signing job depends
+on this gate; no production signing Secret enters QA.
+
+QA and delivery are different files. QA proves the same source runs through the native stack;
+it does not prove installation of the ARM64 delivery file or Redmi-specific behavior. Keep phone
+acceptance explicit. No real model inference is used by the fixture.
+
 ## Agent Device
 
 Agent Device `.ad` scripts are the primary mobile E2E format. An agent discovers a working flow interactively, saves the successful commands, then the replay runner executes the same typed plan locally or in CI.
