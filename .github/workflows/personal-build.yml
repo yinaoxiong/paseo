@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Optional full SHA in approved personal/stable lineage; blank uses this workflow commit.
+        description: Optional full SHA in approved personal/stable lineage; Android prototype branch must build its exact workflow commit.
         type: string
         default: ""
       revision:
@@ -50,7 +50,10 @@ jobs:
     permissions:
       contents: read
       actions: read
-    if: github.repository == 'yinaoxiong/paseo'
+    if: >-
+      github.repository == 'yinaoxiong/paseo' && github.event_name == 'workflow_dispatch' &&
+      (github.ref == 'refs/heads/personal/stable' ||
+      (github.ref == 'refs/heads/integration/android-latex' && inputs.build_scope == 'android-only'))
     runs-on: ubuntu-24.04
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
@@ -67,6 +70,7 @@ jobs:
         env:
           PASEO_SOURCE_SHA: ${{ inputs.source_sha }}
           PASEO_PERSONAL_REVISION: ${{ inputs.revision }}
+          PASEO_BUILD_SCOPE: ${{ inputs.build_scope }}
         run: node scripts/personal/resolve-source.mjs
       - name: Admit an existing candidate build when requested
         env:

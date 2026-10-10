@@ -38,9 +38,49 @@ import {
   trustedPersonalBase,
   assertTrustedPersonalSource,
   resolvePersonalDiffBase,
+  resolvePersonalBuildBranch,
 } from "./personal/trusted-source.mjs";
 
 const repoRoot = new URL("../", import.meta.url);
+test("signed Android preview admits only its exact named candidate and frozen lineage", () => {
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const candidate = {
+    eventName: "workflow_dispatch",
+    ref: "refs/heads/integration/android-latex",
+    buildScope: "android-only",
+    sourceSha: head,
+    workflowSha: head,
+  };
+  assert.equal(resolvePersonalBuildBranch(candidate), "integration/android-latex");
+  assert.equal(
+    resolvePersonalBuildBranch({
+      ...candidate,
+      ref: "refs/heads/personal/stable",
+      buildScope: "all",
+    }),
+    "personal/stable",
+  );
+  assert.throws(
+    () => resolvePersonalBuildBranch({ ...candidate, eventName: "pull_request" }),
+    /manual/,
+  );
+  assert.throws(
+    () => resolvePersonalBuildBranch({ ...candidate, ref: "refs/heads/feature/unsafe" }),
+    /branch/,
+  );
+  assert.throws(() => resolvePersonalBuildBranch({ ...candidate, buildScope: "all" }), /Android/);
+  assert.throws(
+    () => resolvePersonalBuildBranch({ ...candidate, sourceSha: trustedPersonalBase }),
+    /exact/,
+  );
+  assert.throws(() =>
+    resolvePersonalBuildBranch({
+      ...candidate,
+      sourceSha: trustedPersonalBase,
+      workflowSha: trustedPersonalBase,
+    }),
+  );
+});
 test("replayed CI admits the reviewed overlay and handles absent or unrelated push bases", () => {
   const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   // Fork CI has the upstream commit through ancestry, but need not have its tag ref.
@@ -418,7 +458,31 @@ test("personal CI builds are manual, source pinned and least privileged", () => 
   );
   assert.deepEqual(Object.keys(build.on), ["workflow_dispatch"]);
   assert.deepEqual(build.permissions, { contents: "read" });
-  assert.equal(build.jobs.resolve.if, "github.repository == 'yinaoxiong/paseo'");
+  const resolveIf = build.jobs.resolve.if;
+  assert.match(resolveIf, /github.repository == 'yinaoxiong\/paseo'/);
+  const context = {
+    repository: "yinaoxiong/paseo",
+    event_name: "workflow_dispatch",
+    ref: "refs/heads/personal/stable",
+  };
+  assert.equal(
+    runInNewContext(resolveIf, { github: context, inputs: { build_scope: "all" } }),
+    true,
+  );
+  context.ref = "refs/heads/integration/android-latex";
+  assert.equal(
+    runInNewContext(resolveIf, { github: context, inputs: { build_scope: "all" } }),
+    false,
+  );
+  assert.equal(
+    runInNewContext(resolveIf, { github: context, inputs: { build_scope: "android-only" } }),
+    true,
+  );
+  context.event_name = "pull_request";
+  assert.equal(
+    runInNewContext(resolveIf, { github: context, inputs: { build_scope: "android-only" } }),
+    false,
+  );
   for (const key of ["cli", "desktop", "android"]) {
     assert.equal(build.jobs[key].needs, "resolve");
     assert.equal(build.jobs[key].steps[0].with.ref, "${{ needs.resolve.outputs.sha }}");
@@ -474,6 +538,7 @@ test("personal CI builds are manual, source pinned and least privileged", () => 
   );
   assert.deepEqual(checks.permissions, { contents: "read" });
   assert.deepEqual(checks.on.pull_request.branches, ["personal/stable"]);
+  assert.ok(checks.on.push.branches.includes("integration/android-latex"));
   assert.doesNotMatch(JSON.stringify(checks), /secrets\./);
 });
 const ciWorkflowPath = new URL(".github/workflows/ci.yml", repoRoot);

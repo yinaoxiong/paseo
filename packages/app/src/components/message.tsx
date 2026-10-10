@@ -13,7 +13,7 @@ import {
   type TextStyle,
 } from "react-native";
 import { useTranslation } from "react-i18next";
-import { MarkdownParagraphView, MarkdownTextSpan } from "@/components/markdown-text";
+import { MarkdownTextSpan } from "@/components/markdown-text";
 import { MarkdownTableCellText } from "@/components/markdown-text-selection";
 import * as React from "react";
 import {
@@ -68,6 +68,7 @@ import { markdownNodeContainsType } from "@/utils/markdown-ast";
 import { useStableEvent } from "@/hooks/use-stable-event";
 import { HighlightedCodeBlock } from "@/components/highlighted-code-block";
 import { MathFormula } from "@/components/math-formula";
+import { MathParagraph } from "@/components/markdown/math/paragraph";
 import { getMathFormulaTextStyle } from "@/components/math-formula-style";
 import { MarkdownFenceBlock } from "@/components/markdown/fence";
 import type { MarkdownPhase } from "@/components/markdown/fence/types";
@@ -1775,7 +1776,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         <MathFormula
           key={node.key}
           {...getMathFormulaProps(node)}
-          textStyle={getMathFormulaTextStyle(styles.text, styles.body)}
+          textStyle={getMathFormulaTextStyle([styles.body, styles.text], styles.body)}
         />
       ),
       code_block: (
@@ -1947,13 +1948,17 @@ export const AssistantMessage = memo(function AssistantMessage({
         _parent: ASTNode[],
         styles: MarkdownStyles,
       ) => (
-        <MarkdownParagraphView
+        <MathParagraph
           key={node.key}
+          node={node}
           paragraphStyle={styles.paragraph}
+          textStyle={styles.body}
+          linkStyle={styles.link}
+          codeStyle={styles.code_inline}
           containsImage={markdownNodeContainsType(node, "image")}
         >
           {children}
-        </MarkdownParagraphView>
+        </MathParagraph>
       ),
       link: (node: ASTNode, children: ReactNode[], _parent: ASTNode[], styles: MarkdownStyles) => (
         <AssistantMarkdownLink

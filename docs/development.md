@@ -158,7 +158,11 @@ and validates the same files on three systems without desktop/APK signing steps;
 desktop jobs. Use a new personal revision for an APK update; it retains the package ID and signer.
 The existing Mac archive verification mode still reuses the accepted archive. Builds accept a full source SHA and personal revision;
 the resolver admits only commits in the reviewed personal baseline lineage and current
-`personal/stable`. Replaying the overlay onto a new upstream tag changes commit IDs;
+`personal/stable`. The temporary `integration/android-latex` candidate is admitted
+only for manually dispatched `android-only` builds at its exact current workflow
+commit, descended from the reviewed `2f852a5f4` baseline. It allows phone validation
+before daily-branch promotion; it does not admit arbitrary feature branches or PRs.
+Replaying the overlay onto a new upstream tag changes commit IDs;
 update the baseline pin after reviewing that replay. On the first rewritten push,
 Checks uses that pin when the previous push SHA is absent or no longer an ancestor. Signing credentials are not exposed to PR checks.
 

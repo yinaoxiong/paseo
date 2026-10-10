@@ -7,6 +7,23 @@ import { fileURLToPath } from "node:url";
 export const trustedPersonalBase = "c3b671672521ececce77fce2d9bfe94daef944dc";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 
+export function resolvePersonalBuildBranch(context, cwd = root) {
+  const { ref, eventName, buildScope, sourceSha, workflowSha } = context;
+  if (eventName !== "workflow_dispatch") throw new Error("Personal builds require manual dispatch");
+  if (ref === "refs/heads/personal/stable") return "personal/stable";
+  if (ref !== "refs/heads/integration/android-latex") throw new Error("Unapproved build branch");
+  if (buildScope !== "android-only") throw new Error("Candidate branch allows Android-only builds");
+  if (sourceSha !== workflowSha) throw new Error("Candidate must build its exact workflow commit");
+  assertTrustedPersonalSource(sourceSha, cwd);
+  // This candidate belongs to one reviewed prototype, not arbitrary future feature branches.
+  execFileSync(
+    "git",
+    ["merge-base", "--is-ancestor", "2f852a5f444d2e5d1605a14b0798045a9e4a4042", sourceSha],
+    { cwd, stdio: "pipe" },
+  );
+  return "integration/android-latex";
+}
+
 export function assertTrustedPersonalSource(sha, cwd = root) {
   if (!/^[a-f0-9]{40}$/.test(sha ?? "")) throw new Error("Invalid personal source SHA");
   execFileSync("git", ["merge-base", "--is-ancestor", trustedPersonalBase, sha], {

@@ -1,7 +1,7 @@
 name: Personal Checks
 on:
   push:
-    branches: ["personal/**", "integration/personal-*"]
+    branches: ["personal/**", "integration/personal-*", "integration/android-latex"]
   pull_request:
     branches: ["personal/stable"]
   workflow_dispatch:
