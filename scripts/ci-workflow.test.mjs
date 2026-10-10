@@ -44,6 +44,11 @@ import {
 import { androidBuildScript } from "./personal/android-build-script.mjs";
 import {
   androidQaRequest,
+  androidDeliveryRequest,
+  admitAndroidVerifiedQaRun,
+  verifyAndroidDeliveryReport,
+  assertAndroidDeliveryBinding,
+  androidDeliveryProvenance,
   admitAndroidQaRun,
   androidRuntimeTreeHash,
   androidBuildContractHash,
@@ -952,7 +957,7 @@ test("personal CI builds are manual, source pinned and least privileged", () => 
   ]);
   assert.equal(
     build.jobs.cli.if,
-    "inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'android-only' && inputs.build_scope != 'android-qa-verify'",
+    "inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'android-only' && inputs.build_scope != 'android-qa-verify' && inputs.build_scope != 'android-delivery-only'",
   );
   assert.match(build.jobs["npm-install"].if, /!cancelled\(\).*needs\.cli\.result/);
   assert.deepEqual(build.jobs["npm-install"].permissions, { contents: "read", actions: "read" });
@@ -960,15 +965,15 @@ test("personal CI builds are manual, source pinned and least privileged", () => 
     build.jobs.desktop.if,
     "inputs.mac_archive_run_id == '' && inputs.build_scope == 'all'",
   );
-  assert.equal(
-    build.jobs.android.if,
-    "inputs.mac_archive_run_id == '' && (inputs.build_scope == 'all' || inputs.build_scope == 'android-only')",
-  );
+  assert.match(build.jobs.android.if, /needs\.resolve\.result == 'success'/);
+  assert.match(build.jobs.android.if, /needs\['android-qa'\]\.result == 'success'/);
+  assert.match(build.jobs.android.if, /delivery_binding_sha != ''/);
   assert.deepEqual(build.on.workflow_dispatch.inputs.build_scope.options, [
     "all",
     "online-verify",
     "android-only",
     "android-qa-verify",
+    "android-delivery-only",
   ]);
   assert.equal(build.on.workflow_dispatch.inputs.build_scope.default, "all");
   assert.deepEqual(build.jobs["npm-install"].needs, ["resolve", "cli"]);
@@ -1013,6 +1018,7 @@ test("personal build scope routes only the selected platform jobs", () => {
     { scope: "online-verify", expected: ["cli", "npm-install"] },
     { scope: "android-only", expected: ["android-qa-build", "android-qa", "android"] },
     { scope: "android-qa-verify", expected: ["android-qa"] },
+    { scope: "android-delivery-only", expected: ["android"] },
     { scope: "all", mac: "123", expected: ["mac-archive-verification"] },
     { scope: "online-verify", candidate: "123", expected: ["npm-install"] },
     { scope: "android-only", mac: "123", expected: [] },
@@ -1032,9 +1038,19 @@ test("personal build scope routes only the selected platform jobs", () => {
               npm_candidate_run_id: candidate,
             },
             needs: {
-              resolve: { result: "success" },
+              resolve: {
+                result: "success",
+                outputs: {
+                  delivery_binding_sha: scope === "android-delivery-only" ? "a".repeat(64) : "",
+                },
+              },
+              "android-qa": { result: scope === "android-delivery-only" ? "skipped" : "success" },
               cli: { result: "success" },
-              "android-qa-build": { result: scope === "android-qa-verify" ? "skipped" : "success" },
+              "android-qa-build": {
+                result: ["android-qa-verify", "android-delivery-only"].includes(scope)
+                  ? "skipped"
+                  : "success",
+              },
             },
             cancelled: () => false,
           },
@@ -1422,4 +1438,270 @@ test("Math QA fixture keeps plain replies and supplies an unbreakable wide numer
   assert.match(math, /a_\{24\}/);
   assert.ok(math.includes("Short formula $x^2$ inside prose."));
   assert.match(math, /Math QA marker/);
+});
+
+test("ARM64-only delivery rejects mixed scopes and admits an exact successful native QA Run", () => {
+  const input = { scope: "android-delivery-only", runId: "42", reportHash: "a".repeat(64) };
+  assert.deepEqual(androidDeliveryRequest(input), { runId: "42", reportHash: "a".repeat(64) });
+  for (const patch of [
+    { scope: "all" },
+    { runId: "" },
+    { reportHash: "" },
+    { qaRunId: "9" },
+    { npmRunId: "7" },
+    { macRunId: "8" },
+  ])
+    assert.throws(() => androidDeliveryRequest({ ...input, ...patch }), /exclusive/);
+  const run = {
+    id: 42,
+    run_attempt: 1,
+    repository: { full_name: "yinaoxiong/paseo" },
+    workflow_id: 377643758,
+    path: ".github/workflows/personal-build.yml",
+    event: "workflow_dispatch",
+    head_branch: "integration/android-latex",
+    head_sha: "a".repeat(40),
+    status: "completed",
+    conclusion: "success",
+  };
+  const job = {
+    name: "android-qa",
+    run_id: 42,
+    head_sha: run.head_sha,
+    status: "completed",
+    conclusion: "success",
+  };
+  const artifact = {
+    id: 99,
+    name: "personal-android-native-qa",
+    expired: false,
+    digest: "sha256:" + "b".repeat(64),
+    workflow_run: { id: 42, head_sha: run.head_sha, head_branch: run.head_branch },
+  };
+  assert.equal(admitAndroidVerifiedQaRun(run, [job], [artifact]).artifactId, "99");
+  for (const patch of [
+    { conclusion: "failure" },
+    { run_attempt: 2 },
+    { event: "pull_request" },
+    { head_branch: "pr/foreign" },
+  ])
+    assert.throws(() => admitAndroidVerifiedQaRun({ ...run, ...patch }, [job], [artifact]));
+  assert.throws(
+    () => admitAndroidVerifiedQaRun(run, [{ ...job, conclusion: "skipped" }], [artifact]),
+    /job/,
+  );
+  assert.throws(() => admitAndroidVerifiedQaRun(run, [job], [artifact, artifact]), /ambiguous/);
+});
+test("Accepted native QA proof pins application, version, cleanup and signed delivery provenance", () => {
+  const cwd = mkdtempSync(joinPath(os.tmpdir(), "paseo-delivery-proof-"));
+  const git = (...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  const put = (name, body) => {
+    mkdirSync(joinPath(cwd, name, ".."), { recursive: true });
+    writeFileSync(joinPath(cwd, name), body);
+  };
+  const commit = () => {
+    git("add", ".");
+    git(
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "user.name=QA",
+      "-c",
+      "user.email=qa@example.invalid",
+      "commit",
+      "-qm",
+      "fixture",
+    );
+    return git("rev-parse", "HEAD");
+  };
+  try {
+    git("init", "-q");
+    put("package.json", '{"version":"0.11.2"}');
+    put("package-lock.json", "{}");
+    put("packages/app/src/native.ts", "tested");
+    const payload = commit();
+    put("scripts/personal/smoke-android-release.mjs", "verified");
+    const verifier = commit();
+    put("scripts/personal/trusted-source.mjs", "delivery");
+    const target = commit();
+    const names = [
+      "connected",
+      "sidebar-directory-ready",
+      "workspace-selected",
+      "math-open",
+      "plain-chat",
+      "math-return",
+      "foreground-return",
+      "dark-theme",
+      "light-theme",
+      "observed-theme-change",
+      "formula-swipe-left",
+      "formula-content-moved",
+      "formula-swipe-right",
+      "formula-left-edge-0",
+      "formula-left-edge-1",
+      "formula-left-edge-2",
+      "chat-vertical-scroll",
+      "chat-content-moved",
+      "left-panel-open",
+      "left-panel-return",
+      "right-panel-open",
+      "right-panel-return",
+    ];
+    const report = {
+      schemaVersion: 1,
+      mode: "exact-apk-reverification",
+      verificationRunId: "42",
+      verifierSourceSha: verifier,
+      payloadSourceSha: payload,
+      sourceSha: payload,
+      producerRunId: "11",
+      producerRunAttempt: "1",
+      runtimeOutcome: "passed",
+      error: null,
+      qaAbi: "x86_64",
+      installedVersionCode: 11002004,
+      deliveryArm64RuntimeTest: false,
+      apkSha256: "c".repeat(64),
+      qaApkSha256: "c".repeat(64),
+      manifestSha256: "d".repeat(64),
+      runtimeInputSha256: androidRuntimeTreeHash(payload, cwd),
+      buildContractSha256: "b".repeat(64),
+      assertions: names.map((name) => ({ name, passed: true })),
+      cleanup: ["logcat", "app-stop", "reverse-remove"].map((name) => ({ name, passed: true })),
+      horizontalInputs: Array.from({ length: 7 }, () => ({ points: [799, 100, 281, 100] })),
+    };
+    const bytes = Buffer.from(JSON.stringify(report));
+    const context = {
+      cwd,
+      targetSha: target,
+      verifierSha: verifier,
+      revision: 4,
+      runId: "42",
+      deliveryRunId: "77",
+      artifactId: "99",
+      artifactDigest: "sha256:" + "e".repeat(64),
+      reportHash: hashQaBytes(bytes),
+      fixtureCleaned: { isolatedDaemonClosed: true, projectsRemoved: true },
+      buildContract: () => "b".repeat(64),
+    };
+    const binding = verifyAndroidDeliveryReport(bytes, context);
+    assert.equal(binding.sourceSha, target);
+    assert.equal(binding.qaPayloadSha, payload);
+    assert.throws(
+      () => verifyAndroidDeliveryReport(bytes, { ...context, revision: 3 }),
+      /identity/,
+    );
+    assert.throws(
+      () => verifyAndroidDeliveryReport(bytes, { ...context, reportHash: "f".repeat(64) }),
+      /hash/,
+    );
+    assert.throws(
+      () => verifyAndroidDeliveryReport(bytes, { ...context, fixtureCleaned: {} }),
+      /cleanup/,
+    );
+    assert.throws(
+      () => verifyAndroidDeliveryReport(bytes, { ...context, buildContract: () => "f".repeat(64) }),
+      /build inputs/,
+    );
+    for (const patch of [
+      { runtimeOutcome: "failed" },
+      { cleanup: [] },
+      { assertions: report.assertions.filter((x) => x.name !== "formula-content-moved") },
+      { horizontalInputs: [] },
+    ]) {
+      const bad = Buffer.from(JSON.stringify({ ...report, ...patch }));
+      assert.throws(() =>
+        verifyAndroidDeliveryReport(bad, { ...context, reportHash: hashQaBytes(bad) }),
+      );
+    }
+    const bindingBytes = Buffer.from(JSON.stringify(binding, null, 2) + "\n");
+    const signing = {
+      cwd,
+      targetSha: target,
+      revision: 4,
+      deliveryRunId: "77",
+      bindingHash: hashQaBytes(bindingBytes),
+    };
+    assert.equal(assertAndroidDeliveryBinding(bindingBytes, signing).androidVersionCode, 11002004);
+    assert.throws(
+      () => assertAndroidDeliveryBinding(bindingBytes, { ...signing, deliveryRunId: "78" }),
+      /mismatch/,
+    );
+    const pin = JSON.parse(
+      readFileSync(new URL("./personal/android-signing.json", import.meta.url), "utf8"),
+    ).certificateSha256;
+    const manifest = {
+      target: "android-arm64",
+      sourceSha: target,
+      githubRunId: "77",
+      version: binding.version,
+      signerSha256: pin,
+      validation: {
+        signatureVerified: true,
+        packageId: "sh.paseo.personal",
+        abi: "arm64-v8a",
+        androidVersionCode: 11002004,
+      },
+      assets: [
+        {
+          name: `paseo-personal-${binding.version}-android-arm64.apk`,
+          sha256: "c".repeat(64),
+          bytes: 123,
+        },
+      ],
+    };
+    assert.equal(
+      androidDeliveryProvenance(bindingBytes, manifest, signing).delivery.signerSha256,
+      pin,
+    );
+    assert.throws(
+      () =>
+        androidDeliveryProvenance(
+          bindingBytes,
+          { ...manifest, signerSha256: "f".repeat(64) },
+          signing,
+        ),
+      /Signed/,
+    );
+    put("packages/app/src/native.ts", "changed");
+    const changed = commit();
+    assert.throws(
+      () => verifyAndroidDeliveryReport(bytes, { ...context, targetSha: changed }),
+      /native inputs/,
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+test("Delivery-only workflow routes accepted proof admission before signer-bearing ARM64", () => {
+  const w = loadYaml(
+    readFileSync(new URL("../.github/workflows/personal-build.yml", import.meta.url), "utf8"),
+  );
+  assert.ok(w.on.workflow_dispatch.inputs.build_scope.options.includes("android-delivery-only"));
+  const admission = w.jobs.resolve.steps.find((x) => x.id === "accepted_native_qa");
+  assert.ok(admission);
+  assert.doesNotMatch(JSON.stringify(w.jobs.resolve), /secrets\./);
+  assert.ok(w.jobs.android.steps.find((x) => x.name === "Validate accepted native QA binding"));
+  const evaluate = (scope, qa, approved) =>
+    runInNewContext(w.jobs.android.if.replace(/^\$\{\{\s*|\s*\}\}$/g, ""), {
+      cancelled: () => false,
+      inputs: { build_scope: scope, mac_archive_run_id: "" },
+      needs: {
+        resolve: {
+          result: "success",
+          outputs: { delivery_binding_sha: approved ? "a".repeat(64) : "" },
+        },
+        "android-qa": { result: qa },
+      },
+    });
+  for (const [scope, qa, approved, result] of [
+    ["all", "success", false, true],
+    ["all", "failure", true, false],
+    ["android-delivery-only", "skipped", true, true],
+    ["android-delivery-only", "skipped", false, false],
+    ["android-delivery-only", "failure", true, false],
+    ["android-qa-verify", "success", true, false],
+  ])
+    assert.equal(Boolean(evaluate(scope, qa, approved)), result);
 });

@@ -10,9 +10,11 @@ const root = fileURLToPath(new URL("../../", import.meta.url));
 export function resolvePersonalBuildBranch(context, cwd = root) {
   const { ref, eventName, buildScope, sourceSha, workflowSha } = context;
   if (eventName !== "workflow_dispatch") throw new Error("Personal builds require manual dispatch");
+  if (buildScope === "android-delivery-only" && sourceSha !== workflowSha)
+    throw new Error("Delivery must build its exact approved workflow source");
   if (ref === "refs/heads/personal/stable") return "personal/stable";
   if (ref !== "refs/heads/integration/android-latex") throw new Error("Unapproved build branch");
-  if (!["android-only", "android-qa-verify"].includes(buildScope))
+  if (!["android-only", "android-qa-verify", "android-delivery-only"].includes(buildScope))
     throw new Error("Candidate branch allows Android-only builds or secret-free QA reverification");
   if (sourceSha !== workflowSha) throw new Error("Candidate must build its exact workflow commit");
   assertTrustedPersonalSource(sourceSha, cwd);

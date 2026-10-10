@@ -19,7 +19,7 @@ on:
       build_scope:
         description: Build packages, verify online CLI, build Android, or reverify an existing QA APK without compilation.
         type: choice
-        options: [all, online-verify, android-only, android-qa-verify]
+        options: [all, online-verify, android-only, android-qa-verify, android-delivery-only]
         default: all
         required: true
       npm_candidate_run_id:
@@ -46,6 +46,14 @@ on:
         description: Independently accepted SHA-256 of that Run's exact qa-build.json; use android-qa-verify only.
         type: string
         default: ""
+      android_verified_run_id:
+        description: Successful native QA Run whose exact report approves unchanged app inputs for ARM64 delivery only.
+        type: string
+        default: ""
+      android_verified_report_sha256:
+        description: Independently accepted SHA-256 of that Run's qa-runtime.json; use android-delivery-only.
+        type: string
+        default: ""
 permissions:
   contents: read
 concurrency:
@@ -61,7 +69,7 @@ jobs:
     if: >-
       github.repository == 'yinaoxiong/paseo' && github.event_name == 'workflow_dispatch' &&
       (github.ref == 'refs/heads/personal/stable' ||
-      (github.ref == 'refs/heads/integration/android-latex' && (inputs.build_scope == 'android-only' || inputs.build_scope == 'android-qa-verify')))
+      (github.ref == 'refs/heads/integration/android-latex' && (inputs.build_scope == 'android-only' || inputs.build_scope == 'android-qa-verify' || inputs.build_scope == 'android-delivery-only')))
     runs-on: ubuntu-24.04
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
@@ -69,6 +77,7 @@ jobs:
       qa_payload_sha: ${{ steps.android_qa.outputs.qa_payload_sha }}
       qa_run_attempt: ${{ steps.android_qa.outputs.qa_run_attempt }}
       qa_artifact_id: ${{ steps.android_qa.outputs.qa_artifact_id }}
+      delivery_binding_sha: ${{ steps.accepted_native_qa.outputs.binding_sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -100,13 +109,56 @@ jobs:
           PASEO_BUILD_SCOPE: ${{ inputs.build_scope }}
           PASEO_ANDROID_QA_RUN_ID: ${{ inputs.android_qa_run_id }}
           PASEO_ANDROID_QA_MANIFEST_SHA256: ${{ inputs.android_qa_manifest_sha256 }}
+          PASEO_ANDROID_DELIVERY_QA_RUN_ID: ${{ inputs.android_verified_run_id }}
+          PASEO_ANDROID_DELIVERY_QA_REPORT_SHA256: ${{ inputs.android_verified_report_sha256 }}
           PASEO_NPM_CANDIDATE_RUN_ID: ${{ inputs.npm_candidate_run_id }}
           PASEO_MAC_ARCHIVE_RUN_ID: ${{ inputs.mac_archive_run_id }}
           PASEO_NPM_CANDIDATE_MANIFEST_SHA256: ${{ inputs.npm_candidate_manifest_sha256 }}
           PASEO_MAC_ARCHIVE_SHA256: ${{ inputs.mac_archive_sha256 }}
         run: node scripts/personal/resolve-android-qa-candidate.mjs
+      - name: Download accepted native QA proof
+        if: inputs.build_scope == 'android-delivery-only'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: personal-android-native-qa
+          path: .dev/android-delivery-input
+          run-id: ${{ inputs.android_verified_run_id }}
+          github-token: ${{ github.token }}
+      - name: Prepare proof validation container
+        if: inputs.build_scope == 'android-delivery-only'
+        run: |
+          npm install -g npm@11.19.0 @devcontainers/cli@0.87.0 --ignore-scripts --no-audit --no-fund
+          node scripts/personal/prepare-ci-container.mjs
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: inputs.build_scope == 'android-delivery-only'
+        with:
+          path: ${{ runner.temp }}/paseo-npm-cache
+          key: personal-npm-linux-x64-node24.21.0-npm11.19.0-${{ hashFiles('package-lock.json') }}
+      - id: accepted_native_qa
+        name: Verify accepted native QA before signing admission
+        if: inputs.build_scope == 'android-delivery-only'
+        env:
+          PASEO_BUILD_SCOPE: ${{ inputs.build_scope }}
+          PASEO_PERSONAL_REVISION: ${{ steps.resolve.outputs.revision }}
+          PASEO_ANDROID_DELIVERY_QA_RUN_ID: ${{ inputs.android_verified_run_id }}
+          PASEO_ANDROID_DELIVERY_QA_REPORT_SHA256: ${{ inputs.android_verified_report_sha256 }}
+          PASEO_ANDROID_DELIVERY_QA_SOURCE_SHA: ${{ steps.android_qa.outputs.qa_verified_source_sha }}
+          PASEO_ANDROID_DELIVERY_QA_ARTIFACT_ID: ${{ steps.android_qa.outputs.qa_verified_artifact_id }}
+          PASEO_ANDROID_DELIVERY_QA_ARTIFACT_DIGEST: ${{ steps.android_qa.outputs.qa_verified_artifact_digest }}
+          TARGET_SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          devcontainer up --workspace-folder "$GITHUB_WORKSPACE" --override-config "$RUNNER_TEMP/paseo-personal-ci-devcontainer.json" --mount-git-worktree-common-dir true
+          devcontainer exec --workspace-folder "$GITHUB_WORKSPACE" --override-config "$RUNNER_TEMP/paseo-personal-ci-devcontainer.json" --mount-git-worktree-common-dir true --remote-env "PASEO_BUILD_SCOPE=$PASEO_BUILD_SCOPE" --remote-env "PASEO_PERSONAL_REVISION=$PASEO_PERSONAL_REVISION" --remote-env "PASEO_ANDROID_DELIVERY_QA_RUN_ID=$PASEO_ANDROID_DELIVERY_QA_RUN_ID" --remote-env "PASEO_ANDROID_DELIVERY_QA_REPORT_SHA256=$PASEO_ANDROID_DELIVERY_QA_REPORT_SHA256" --remote-env "PASEO_ANDROID_DELIVERY_QA_SOURCE_SHA=$PASEO_ANDROID_DELIVERY_QA_SOURCE_SHA" --remote-env "PASEO_ANDROID_DELIVERY_QA_ARTIFACT_ID=$PASEO_ANDROID_DELIVERY_QA_ARTIFACT_ID" --remote-env "PASEO_ANDROID_DELIVERY_QA_ARTIFACT_DIGEST=$PASEO_ANDROID_DELIVERY_QA_ARTIFACT_DIGEST" node scripts/personal/verify-android-qa-input.mjs .dev/android-delivery-input .dev/android-delivery-approval.json
+          node --input-type=module -e 'import fs from "node:fs"; import {sha256,assertAndroidDeliveryBinding} from "./scripts/personal/android-qa-reverification.mjs"; const bytes=fs.readFileSync(".dev/android-delivery-approval.json"); const hash=sha256(bytes); assertAndroidDeliveryBinding(bytes,{targetSha:process.env.TARGET_SHA,revision:process.env.PASEO_PERSONAL_REVISION,deliveryRunId:process.env.GITHUB_RUN_ID,bindingHash:hash}); fs.appendFileSync(process.env.GITHUB_OUTPUT,"binding_sha="+hash+"\n");'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: inputs.build_scope == 'android-delivery-only'
+        with:
+          name: personal-android-qa-approval
+          path: .dev/android-delivery-approval.json
+          if-no-files-found: error
+          retention-days: 14
   cli:
-    if: inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'android-only' && inputs.build_scope != 'android-qa-verify'
+    if: inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'android-only' && inputs.build_scope != 'android-qa-verify' && inputs.build_scope != 'android-delivery-only'
     needs: resolve
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -140,7 +192,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-    if: ${{ !cancelled() && inputs.build_scope != 'android-only' && inputs.build_scope != 'android-qa-verify' && inputs.mac_archive_run_id == '' && needs.resolve.result == 'success' && (needs.cli.result == 'success' || inputs.npm_candidate_run_id != '') }}
+    if: ${{ !cancelled() && inputs.build_scope != 'android-only' && inputs.build_scope != 'android-qa-verify' && inputs.build_scope != 'android-delivery-only' && inputs.mac_archive_run_id == '' && needs.resolve.result == 'success' && (needs.cli.result == 'success' || inputs.npm_candidate_run_id != '') }}
     needs: [resolve, cli]
     env:
       PASEO_NPM_CANDIDATE_RUN_ID: ${{ inputs.npm_candidate_run_id }}
@@ -227,7 +279,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   android-qa-build:
-    if: inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'online-verify' && inputs.build_scope != 'android-qa-verify'
+    if: inputs.mac_archive_run_id == '' && inputs.npm_candidate_run_id == '' && inputs.build_scope != 'online-verify' && inputs.build_scope != 'android-qa-verify' && inputs.build_scope != 'android-delivery-only'
     needs: resolve
     runs-on: ubuntu-24.04
     timeout-minutes: 75
@@ -359,18 +411,35 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   android:
-    if: inputs.mac_archive_run_id == '' && (inputs.build_scope == 'all' || inputs.build_scope == 'android-only')
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && inputs.mac_archive_run_id == '' && (((inputs.build_scope == 'all' || inputs.build_scope == 'android-only') && needs['android-qa'].result == 'success') || (inputs.build_scope == 'android-delivery-only' && needs['android-qa'].result == 'skipped' && needs.resolve.outputs.delivery_binding_sha != '')) }}
     needs: [resolve, android-qa]
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24.21.0"
+      - name: Download accepted native QA binding
+        if: inputs.build_scope == 'android-delivery-only'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: personal-android-qa-approval
+          path: .dev/android-delivery-proof
+      - name: Validate accepted native QA binding
+        if: inputs.build_scope == 'android-delivery-only'
+        env:
+          TARGET_SHA: ${{ needs.resolve.outputs.sha }}
+          REVISION: ${{ needs.resolve.outputs.revision }}
+          BINDING_HASH: ${{ needs.resolve.outputs.delivery_binding_sha }}
+        run: node --input-type=module -e 'import fs from "node:fs"; import {assertAndroidDeliveryBinding} from "./scripts/personal/android-qa-reverification.mjs"; assertAndroidDeliveryBinding(fs.readFileSync(".dev/android-delivery-proof/android-delivery-approval.json"),{targetSha:process.env.TARGET_SHA,revision:process.env.REVISION,deliveryRunId:process.env.GITHUB_RUN_ID,bindingHash:process.env.BINDING_HASH});'
       - name: Prepare dedicated builder
         run: |
           npm install -g npm@11.19.0 --ignore-scripts --no-audit --no-fund
@@ -409,6 +478,13 @@ jobs:
           chmod 600 "$signing_dir/key.p12"
           unset PASEO_ANDROID_KEYSTORE_B64
           PASEO_ANDROID_KEYSTORE="$signing_dir/key.p12" npm run personal:android -- "$REVISION" .local-build/personal-ci
+      - name: Bind ARM64 package to accepted native QA
+        if: inputs.build_scope == 'android-delivery-only'
+        env:
+          TARGET_SHA: ${{ needs.resolve.outputs.sha }}
+          REVISION: ${{ needs.resolve.outputs.revision }}
+          BINDING_HASH: ${{ needs.resolve.outputs.delivery_binding_sha }}
+        run: node --input-type=module -e 'import fs from "node:fs"; import {androidDeliveryProvenance,sha256} from "./scripts/personal/android-qa-reverification.mjs"; const bytes=fs.readFileSync(".dev/android-delivery-proof/android-delivery-approval.json"); const manifest=JSON.parse(fs.readFileSync(".local-build/personal-ci/manifest-android-arm64.json","utf8")); const proof=androidDeliveryProvenance(bytes,manifest,{targetSha:process.env.TARGET_SHA,revision:process.env.REVISION,deliveryRunId:process.env.GITHUB_RUN_ID,bindingHash:process.env.BINDING_HASH}); const data=JSON.stringify(proof,null,2)+"\n"; const name="native-qa-approval-android-arm64.json"; fs.writeFileSync(".local-build/personal-ci/"+name,data,{flag:"wx"}); fs.writeFileSync(".local-build/personal-ci/"+name+".sha256",sha256(Buffer.from(data))+"  "+name+"\n",{flag:"wx"});'
       - name: Preserve dependency/toolchain downloads after a failed build
         if: always() && steps.android-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

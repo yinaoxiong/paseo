@@ -30,6 +30,14 @@ input when you are investigating its native failure. The mode downloads that exa
 APK compilation, deliverable packaging and signing. Fixture startup still builds the server stack. App/native/dependency or QA build-definition changes require
 a new APK. The input guard checks source trees and the original build definition before adb runs.
 
+For a signed ARM64 candidate after native QA passes, select `android-delivery-only` and pin the
+successful QA Run plus the exact `qa-runtime.json` SHA-256. Secret-free source admission checks
+its trusted Run/job/artifact, all assertions/cleanup, version and unchanged app/build inputs.
+Only then can the existing ARM64 signing job run. It skips x86 compilation and repeated UI tests;
+new app or build inputs require fresh QA. The package retains its existing signing identity and
+includes a separately checksummed QA approval linked to its APK manifest. Phone acceptance stays
+explicit; a passed x86 QA artifact is not an ARM64 installation receipt.
+
 Keep producer and verifier provenance separate: `payloadSourceSha` identifies the APK code;
 `verifierSourceSha` identifies the current test driver. `qa-runtime.json` retains both Runs,
 input hashes, partial assertions, failure and cleanup results. A failed app or emulator test remains

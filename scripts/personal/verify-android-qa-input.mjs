@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { load as loadYaml } from "js-yaml";
 import { repoRoot } from "./build-info.mjs";
 import {
   androidQaVerifyScope,
+  androidDeliveryScope,
+  verifyAndroidDeliveryReport,
   androidRuntimeTreeHash,
   androidBuildContractHash,
   verifyAndroidQaArtifact,
@@ -16,6 +18,35 @@ const git = (...args) => execFileSync("git", args, { cwd: repoRoot, encoding: "u
 const verifierSha = git("rev-parse", "HEAD");
 if (git("status", "--porcelain=v1", "--untracked-files=all"))
   throw new Error("Commit verifier changes before exact APK reverification");
+if (process.env.PASEO_BUILD_SCOPE === androidDeliveryScope) {
+  const binding = verifyAndroidDeliveryReport(
+    readFileSync(path.join(directory, "android-qa-results/qa-runtime.json")),
+    {
+      targetSha: verifierSha,
+      verifierSha: process.env.PASEO_ANDROID_DELIVERY_QA_SOURCE_SHA,
+      revision: process.env.PASEO_PERSONAL_REVISION,
+      runId: process.env.PASEO_ANDROID_DELIVERY_QA_RUN_ID,
+      reportHash: process.env.PASEO_ANDROID_DELIVERY_QA_REPORT_SHA256,
+      deliveryRunId: process.env.GITHUB_RUN_ID,
+      artifactId: process.env.PASEO_ANDROID_DELIVERY_QA_ARTIFACT_ID,
+      artifactDigest: process.env.PASEO_ANDROID_DELIVERY_QA_ARTIFACT_DIGEST,
+      fixtureCleaned: JSON.parse(
+        readFileSync(path.join(directory, "paseo-qa-state/fixture-cleaned.json"), "utf8"),
+      ),
+      buildContract: (sha) =>
+        androidBuildContractHash(
+          loadYaml(git("show", `${sha}:.github/workflows/personal-build.yml`)),
+        ),
+    },
+  );
+  for (const source of [verifierSha, binding.qaVerifierSha, binding.qaPayloadSha])
+    assertTrustedPersonalSource(source);
+  writeFileSync(output, JSON.stringify(binding, null, 2) + "\n", { flag: "wx" });
+  console.log(
+    `Accepted successful native QA ${binding.qaRunId} for ARM64 source ${binding.sourceSha}, code ${binding.androidVersionCode}`,
+  );
+  process.exit(0);
+}
 const reuse = process.env.PASEO_BUILD_SCOPE === androidQaVerifyScope;
 const payloadSha = reuse ? process.env.PASEO_ANDROID_QA_PAYLOAD_SHA : verifierSha;
 assertTrustedPersonalSource(payloadSha);
