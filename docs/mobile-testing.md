@@ -14,8 +14,14 @@ system Back and return home instead of testing the app. Keep system navigation u
 the coordinates in the runtime proof.
 Use a wide fraction numerator in the fixture; a string of outer plus operators can wrap instead
 of overflowing. Verify the fixture in the offline HTML runtime before a native retry. Appearance
-checks wait for observed dark/light brightness inside the existing bounded UI wait; a stable
-WebView ID or fixed sleep does not establish theme completion.
+checks select Dark and Light through the existing app Appearance picker, observe the committed
+preference and closed menu, then require the math chat's dark/light brightness inside the existing
+bounded UI wait. A stable WebView ID, fixed sleep, or successful device night-mode command does
+not establish app appearance. This checks explicit app preferences; automatic system following
+remains separate coverage. Retain failed adaptive-system observations instead of relabeling them.
+Android menuitem rows can report `clickable=false` while accepting coordinate taps. Identify an
+enabled visible row by its exact accessibility label inside the owned menu backdrop; retain the
+committed-value, closed-menu and actual-appearance checks after tapping.
 Failure retains screenshots, hierarchy and logcat. The ARM64 signing job depends
 on this gate; no production signing Secret enters QA.
 

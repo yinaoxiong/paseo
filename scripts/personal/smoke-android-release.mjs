@@ -19,6 +19,9 @@ import {
   androidCaptureOptions,
   androidInteriorHorizontalSwipe,
   assertAndroidThemeSample,
+  androidThemePickerRect,
+  androidThemeOptionRect,
+  assertAndroidThemeSelected,
   androidQaLongFormulaRect,
   androidQaFormulaSwipeRect,
   androidQaWorkspaceRowId,
@@ -81,7 +84,11 @@ async function expectUi(name, id, options = {}) {
       const nodes = assertHealthyAndroidUi(xml, id);
       assertAndroidDestination(nodes, options);
       if (options.workspace) assertAndroidWorkspaceSelected(nodes, options.workspace);
+      if (options.themePicker) androidThemePickerRect(nodes);
+      if (options.themeOption) androidThemeOptionRect(nodes, options.themeOption);
+      if (options.selectedTheme) assertAndroidThemeSelected(nodes, options.selectedTheme);
       const observed = { name, expectedId: id, passed: true };
+      if (options.selectedTheme) observed.selectedTheme = options.selectedTheme;
       if (options.theme) {
         observed.brightness = androidFrameBrightness(
           rawScreen(),
@@ -89,6 +96,7 @@ async function expectUi(name, id, options = {}) {
         );
         assertAndroidThemeSample(observed.brightness, options.theme);
         observed.theme = options.theme;
+        observed.method = "app-preference";
       }
       assertions.push(observed);
       return nodes;
@@ -190,11 +198,31 @@ try {
   writeFileSync(path.join(outDir, "background-focus.txt"), homeFocus + "\n");
   open(fixture.routes.math);
   nodes = await expectUi("foreground-return", "android-math-webview", { text: "Math QA marker." });
-  adb("shell", "cmd", "uimode", "night", "yes");
-  nodes = await expectUi("dark-theme", "android-math-webview", { theme: "dark" });
+  const selectTheme = async (theme) => {
+    open("paseo-personal://settings/appearance");
+    let appearance = await expectUi(`appearance-${theme}-open`, "android:id/content", {
+      themePicker: true,
+      noMath: true,
+    });
+    tapRect(androidThemePickerRect(appearance));
+    appearance = await expectUi(`appearance-${theme}-options`, "android:id/content", {
+      themeOption: theme,
+      noMath: true,
+    });
+    tapRect(androidThemeOptionRect(appearance, theme));
+    await expectUi(`appearance-${theme}-selected`, "android:id/content", {
+      selectedTheme: theme,
+      noMath: true,
+    });
+    open(fixture.routes.math);
+    return expectUi(`${theme}-theme`, "android-math-webview", {
+      text: "Math QA marker.",
+      theme,
+    });
+  };
+  nodes = await selectTheme("dark");
   const darkBrightness = assertions.at(-1).brightness;
-  adb("shell", "cmd", "uimode", "night", "no");
-  nodes = await expectUi("light-theme", "android-math-webview", { theme: "light" });
+  nodes = await selectTheme("light");
   const lightBrightness = assertions.at(-1).brightness;
   if (darkBrightness >= 128 || lightBrightness <= 128 || lightBrightness - darkBrightness < 60)
     throw new Error("App did not visibly change between dark and light themes");
@@ -299,6 +327,10 @@ try {
         cleanup,
         installedVersionCode,
         fixturePort: fixture.port,
+        appearanceCoverage: {
+          method: "app-preference",
+          automaticSystemFollowing: "not established",
+        },
       },
       null,
       2,

@@ -67,12 +67,72 @@ import {
   androidCaptureOptions,
   androidInteriorHorizontalSwipe,
   assertAndroidThemeSample,
+  androidThemePickerRect,
+  androidThemeOptionRect,
+  assertAndroidThemeSelected,
   androidQaLongFormulaRect,
   androidQaFormulaSwipeRect,
   androidQaWorkspaceRowId,
   assertAndroidWorkspaceSelected,
 } from "./personal/android-ui-proof.mjs";
 const repoRoot = new URL("../", import.meta.url);
+test("native appearance selection requires a unique visible control and committed choice", () => {
+  const root = '<hierarchy><node bounds="[0,0][300,600]" />';
+  const picker =
+    '<node content-desc="Theme: System" clickable="true" bounds="[100,80][290,130]" />';
+  const dark = '<node content-desc="Dark" clickable="true" bounds="[100,140][290,190]" />';
+  const backdrop = '<node content-desc="Menu backdrop" clickable="true" bounds="[0,0][300,600]" />';
+  const child = '<node text="Dark" clickable="false" bounds="[110,150][280,180]" />';
+  const nodes = (body) => androidUiNodes(root + body + "</hierarchy>");
+  assert.deepEqual(androidThemePickerRect(nodes(picker)), [100, 80, 290, 130]);
+  assert.deepEqual(
+    androidThemeOptionRect(nodes(picker + backdrop + dark + child), "dark"),
+    [100, 140, 290, 190],
+  );
+  assert.throws(() => androidThemeOptionRect(nodes(picker), "dark"), /unique visible/);
+  assert.throws(
+    () => androidThemeOptionRect(nodes(picker + backdrop + dark + dark), "dark"),
+    /unique visible/,
+  );
+  assert.throws(() => androidThemePickerRect(nodes(picker + picker)), /unique visible/);
+  assert.throws(
+    () => androidThemePickerRect(nodes(picker.replace("[100,80][290,130]", "[-200,80][-10,130]"))),
+    /unique visible/,
+  );
+  assert.throws(() => assertAndroidThemeSelected(nodes(picker), "dark"), /committed/);
+  const selected = picker.replace("Theme: System", "Theme: Dark");
+  assert.throws(
+    () => assertAndroidThemeSelected(nodes(selected + backdrop + dark), "dark"),
+    /still open/,
+  );
+  assert.doesNotThrow(() => assertAndroidThemeSelected(nodes(selected), "dark"));
+  assert.throws(() => assertAndroidThemeSelected(nodes(selected), "light"), /committed/);
+  assert.throws(() => androidThemeOptionRect(nodes(dark), "other"), /Unsupported/);
+});
+test("native menu roles remain tappable when Android does not report clickable", () => {
+  const xml =
+    '<hierarchy><node bounds="[0,0][1080,2400]" /><node content-desc="Menu backdrop" clickable="true" enabled="true" bounds="[0,0][1080,2400]" /><node content-desc="Dark" clickable="false" enabled="true" bounds="[488,705][987,810]" /><node text="Dark" clickable="false" bounds="[575,734][657,782]" /></hierarchy>';
+  assert.deepEqual(androidThemeOptionRect(androidUiNodes(xml), "dark"), [488, 705, 987, 810]);
+  assert.throws(
+    () =>
+      androidThemeOptionRect(androidUiNodes(xml.replace("Menu backdrop", "Other overlay")), "dark"),
+    /unique visible/,
+  );
+  assert.throws(
+    () =>
+      androidThemeOptionRect(
+        androidUiNodes(
+          xml.replace(
+            'content-desc="Dark" clickable="false" enabled="true"',
+            'content-desc="Dark" clickable="false" enabled="false"',
+          ),
+        ),
+        "dark",
+      ),
+    /unique visible/,
+  );
+  assert.throws(() => assertAndroidThemeSelected(androidUiNodes(xml), "dark"), /still open/);
+});
 test("Android APK reverification requires exclusive exact producer inputs", () => {
   assert.equal(androidQaRequest({ scope: "all" }), null);
   const input = { scope: "android-qa-verify", runId: "42", manifestHash: "a".repeat(64) };

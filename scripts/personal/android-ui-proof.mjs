@@ -213,3 +213,61 @@ export function assertAndroidThemeSample(value, theme) {
   if (theme === "dark" ? value >= 128 : value <= 128)
     throw new Error(`Android theme has not reached ${theme}: median ${value}`);
 }
+
+const themeLabels = { dark: "Dark", light: "Light" };
+function themeLabel(theme) {
+  if (!Object.hasOwn(themeLabels, theme)) throw new Error("Unsupported QA theme preference");
+  return themeLabels[theme];
+}
+function themeControl(nodes, matches, requireClickable = true) {
+  const controls = nodes.filter(
+    (node) =>
+      (!requireClickable || node.clickable === "true") &&
+      node.enabled !== "false" &&
+      androidNodeVisible(node, nodes) &&
+      matches(node),
+  );
+  if (controls.length !== 1) throw new Error("Missing unique visible appearance control");
+  return controls[0];
+}
+export function androidThemePickerRect(nodes) {
+  return themeControl(nodes, (node) => /^Theme: .+/.test(node["content-desc"] ?? "")).rect;
+}
+export function androidThemeOptionRect(nodes, theme) {
+  const label = themeLabel(theme);
+  const backdrop = themeControl(nodes, (node) => node["content-desc"] === "Menu backdrop");
+  // Android menuitem roles can expose clickable=false despite handling native taps.
+  // Own the open menu and row label; nested text is not the menu item.
+  const row = themeControl(nodes, (node) => node["content-desc"] === label, false);
+  if (
+    row.rect[0] < backdrop.rect[0] ||
+    row.rect[1] < backdrop.rect[1] ||
+    row.rect[2] > backdrop.rect[2] ||
+    row.rect[3] > backdrop.rect[3]
+  )
+    throw new Error("Theme option lies outside its menu backdrop");
+  return row.rect;
+}
+export function assertAndroidThemeSelected(nodes, theme) {
+  const label = themeLabel(theme);
+  if (
+    nodes.some(
+      (node) => node["content-desc"] === "Menu backdrop" && androidNodeVisible(node, nodes),
+    )
+  )
+    throw new Error("Theme menu is still open after selection");
+  const picker = themeControl(nodes, (node) => /^Theme: .+/.test(node["content-desc"] ?? ""));
+  if (picker["content-desc"] !== `Theme: ${label}`)
+    throw new Error("Requested app theme preference was not committed");
+  if (
+    nodes.some(
+      (node) =>
+        node.clickable === "true" &&
+        androidNodeVisible(node, nodes) &&
+        Object.values(themeLabels).some(
+          (value) => node["content-desc"] === value || node.text === value,
+        ),
+    )
+  )
+    throw new Error("Theme menu is still open after selection");
+}
